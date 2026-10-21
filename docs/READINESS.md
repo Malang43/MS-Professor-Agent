@@ -1,6 +1,6 @@
 # Local readiness report - 2026-10-21
 
-This report describes the local revision containing it. No push, cloud resource creation, remote migration, deployment, paid subscription, domain purchase, live email or live AI request was performed.
+For the subsequent authorized mock production deployment, see [DEPLOYMENT-STATUS.md](DEPLOYMENT-STATUS.md). The historical checks below describe the pre-deployment revision. This report describes the local revision containing it. No push, cloud resource creation, remote migration, deployment, paid subscription, domain purchase, live email or live AI request was performed.
 
 ## Implemented and locally verified
 

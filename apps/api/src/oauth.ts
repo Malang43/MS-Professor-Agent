@@ -142,11 +142,13 @@ export async function startOAuth(
       await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
     ),
   );
+  // A provider-wide cookie is overwritten by a second tab/Connect attempt.
+  const stateHash = await hash(state);
   await env.DB.prepare(
     "INSERT INTO oauth_states(state_hash,user_id,provider,session_hash,binding_hash,verifier,read_replies,expires_at) VALUES(?,?,?,?,?,?,?,?)",
   )
     .bind(
-      await hash(state),
+      stateHash,
       user,
       provider,
       await hash(cookie(req, "session")),
@@ -173,7 +175,7 @@ export async function startOAuth(
     { url: url.href },
     {
       headers: {
-        "Set-Cookie": `oauth_${provider}=${binding}; HttpOnly; Secure; SameSite=Lax; Path=/api/oauth/${provider}/callback; Max-Age=600`,
+        "Set-Cookie": `oauth_${provider}_${stateHash}=${binding}; HttpOnly; Secure; SameSite=Lax; Path=/api/oauth/${provider}/callback; Max-Age=600`,
       },
     },
   );
@@ -184,123 +186,155 @@ export async function finishOAuth(
   provider: ProviderName,
   network: Fetcher = fetch,
 ) {
-  const config = credentials(env, provider),
-    url = new URL(req.url),
-    state = url.searchParams.get("state") || "";
-  const row = await env.DB.prepare(
-    "SELECT * FROM oauth_states WHERE state_hash=? AND provider=? AND expires_at>?",
-  )
-    .bind(await hash(state), provider, Date.now())
-    .first<any>();
-  if (
-    !row ||
-    row.binding_hash !== (await hash(cookie(req, `oauth_${provider}`)))
-  )
-    throw new HttpError(400, "Invalid or expired OAuth state.");
-  const active = await env.DB.prepare(
-    "SELECT user_id FROM sessions WHERE token=? AND user_id=? AND expires_at>?",
-  )
-    .bind(row.session_hash, row.user_id, Date.now())
-    .first();
-  if (!active)
-    throw new HttpError(401, "Session expired; sign in and reconnect.");
-  const consumed = await env.DB.prepare(
-    "DELETE FROM oauth_states WHERE state_hash=? RETURNING state_hash",
-  )
-    .bind(await hash(state))
-    .first();
-  if (!consumed) throw new HttpError(400, "OAuth state already used.");
-  if (url.searchParams.has("error") || !url.searchParams.get("code"))
-    throw new HttpError(400, "Account authorization was not completed.");
-  const verifier = await decrypt<string>(
-    env,
-    `${row.user_id}:${provider}:pkce`,
-    row.verifier,
-  );
-  const tokens = (await providerRequest(
-    oauthConfig(provider).token,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id: config.client,
-        client_secret: config.secret,
-        redirect_uri: config.redirect,
-        grant_type: "authorization_code",
-        code: url.searchParams.get("code")!,
-        code_verifier: verifier,
-      }),
-    },
-    network,
-  )) as TokenSet;
-  if (
-    !tokens.access_token ||
-    !tokens.refresh_token ||
-    !Number.isFinite(tokens.expires_in)
-  )
-    throw new HttpError(
-      400,
-      "Offline access was not granted; reconnect with consent.",
+  let category = "configuration";
+  try {
+    const config = credentials(env, provider),
+      url = new URL(req.url),
+      state = url.searchParams.get("state") || "";
+    category = "state_missing";
+    if (!state) throw new HttpError(400, "Invalid or expired OAuth state.");
+    const stateHash = await hash(state);
+    category = "state_lookup";
+    const row = await env.DB.prepare(
+      "SELECT * FROM oauth_states WHERE state_hash=? AND provider=?",
+    )
+      .bind(stateHash, provider)
+      .first<any>();
+    category = "state_not_found";
+    if (!row) throw new HttpError(400, "Invalid or expired OAuth state.");
+    category = "state_expired";
+    if (row.expires_at <= Date.now())
+      throw new HttpError(400, "Invalid or expired OAuth state.");
+    const binding = cookie(req, `oauth_${provider}_${stateHash}`);
+    category = "binding_cookie_missing";
+    if (!binding) throw new HttpError(400, "Invalid or expired OAuth state.");
+    category = "binding_cookie_mismatch";
+    if (row.binding_hash !== (await hash(binding)))
+      throw new HttpError(400, "Invalid or expired OAuth state.");
+    category = "session_validation";
+    const active = await env.DB.prepare(
+      "SELECT user_id FROM sessions WHERE token=? AND user_id=? AND expires_at>?",
+    )
+      .bind(row.session_hash, row.user_id, Date.now())
+      .first();
+    if (!active)
+      throw new HttpError(401, "Session expired; sign in and reconnect.");
+    category = "state_consumption";
+    const consumed = await env.DB.prepare(
+      "DELETE FROM oauth_states WHERE state_hash=? RETURNING state_hash",
+    )
+      .bind(stateHash)
+      .first();
+    if (!consumed) throw new HttpError(400, "OAuth state already used.");
+    category = "authorization_incomplete";
+    if (url.searchParams.has("error") || !url.searchParams.get("code"))
+      throw new HttpError(400, "Account authorization was not completed.");
+    category = "pkce_decryption";
+    const verifier = await decrypt<string>(
+      env,
+      `${row.user_id}:${provider}:pkce`,
+      row.verifier,
     );
-  const granted = (tokens.scope || "").split(" ");
-  const required = scopes(provider, !!row.read_replies).filter(
-    (s) => !["openid", "email", "offline_access"].includes(s),
-  );
-  if (
-    required.some(
-      (s) =>
-        !granted.includes(s) &&
-        !granted.includes("https://graph.microsoft.com/" + s),
+    category = "token_exchange";
+    const tokens = (await providerRequest(
+      oauthConfig(provider).token,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: config.client,
+          client_secret: config.secret,
+          redirect_uri: config.redirect,
+          grant_type: "authorization_code",
+          code: url.searchParams.get("code")!,
+          code_verifier: verifier,
+        }),
+      },
+      network,
+    )) as TokenSet;
+    category = "offline_access_missing";
+    if (
+      !tokens.access_token ||
+      !tokens.refresh_token ||
+      !Number.isFinite(tokens.expires_in)
     )
-  )
-    throw new HttpError(400, "Required mailbox scopes were not granted.");
-  const identity = await providerRequest(
-    provider === "gmail"
-      ? "https://openidconnect.googleapis.com/v1/userinfo"
-      : "https://graph.microsoft.com/v1.0/me?$select=id,mail,userPrincipalName",
-    { headers: { Authorization: `Bearer ${tokens.access_token}` } },
-    network,
-  );
-  const address = String(
+      throw new HttpError(
+        400,
+        "Offline access was not granted; reconnect with consent.",
+      );
+    category = "mailbox_scopes_missing";
+    const granted = (tokens.scope || "").split(" ");
+    const required = scopes(provider, !!row.read_replies).filter(
+      (s) => !["openid", "email", "offline_access"].includes(s),
+    );
+    if (
+      required.some(
+        (s) =>
+          !granted.includes(s) &&
+          !granted.includes("https://graph.microsoft.com/" + s),
+      )
+    )
+      throw new HttpError(400, "Required mailbox scopes were not granted.");
+    category = "identity_request";
+    const identity = await providerRequest(
       provider === "gmail"
-        ? identity.email
-        : identity.mail || identity.userPrincipalName,
-    ).toLowerCase(),
-    subject = String(provider === "gmail" ? identity.sub : identity.id);
-  if (
-    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address) ||
-    !subject ||
-    (provider === "gmail" && !identity.email_verified)
-  )
-    throw new HttpError(400, "Mailbox identity could not be verified.");
-  const encrypted = await encrypt(env, context(row.user_id, provider), tokens);
-  await env.DB.prepare(
-    `INSERT INTO connections(id,user_id,provider,address,subject,status,scopes,tokens,expires_at) VALUES(?,?,?,?,?,'connected',?,?,?) ON CONFLICT(user_id,provider,subject) DO UPDATE SET address=excluded.address,status='connected',scopes=excluded.scopes,tokens=excluded.tokens,expires_at=excluded.expires_at,refresh_lease=NULL,refresh_until=0`,
-  )
-    .bind(
-      crypto.randomUUID(),
-      row.user_id,
-      provider,
-      address,
-      subject,
-      granted.join(" "),
-      encrypted,
-      Date.now() + tokens.expires_in * 1000,
+        ? "https://openidconnect.googleapis.com/v1/userinfo"
+        : "https://graph.microsoft.com/v1.0/me?$select=id,mail,userPrincipalName",
+      { headers: { Authorization: `Bearer ${tokens.access_token}` } },
+      network,
+    );
+    category = "identity_unverified";
+    const address = String(
+        provider === "gmail"
+          ? identity.email
+          : identity.mail || identity.userPrincipalName,
+      ).toLowerCase(),
+      subject = String(provider === "gmail" ? identity.sub : identity.id);
+    if (
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address) ||
+      !subject ||
+      (provider === "gmail" && !identity.email_verified)
     )
-    .run();
-  await notify(
-    env,
-    row.user_id,
-    "connection",
-    "Mailbox connected; live sending remains controlled by server configuration.",
-  );
-  return new Response(null, {
-    status: 303,
-    headers: {
-      Location: env.APP_ORIGIN + "/?connection=connected",
-      "Set-Cookie": `oauth_${provider}=; HttpOnly; Secure; SameSite=Lax; Path=/api/oauth/${provider}/callback; Max-Age=0`,
-    },
-  });
+      throw new HttpError(400, "Mailbox identity could not be verified.");
+    category = "token_encryption";
+    const encrypted = await encrypt(
+      env,
+      context(row.user_id, provider),
+      tokens,
+    );
+    category = "connection_save";
+    await env.DB.prepare(
+      `INSERT INTO connections(id,user_id,provider,address,subject,status,scopes,tokens,expires_at) VALUES(?,?,?,?,?,'connected',?,?,?) ON CONFLICT(user_id,provider,subject) DO UPDATE SET address=excluded.address,status='connected',scopes=excluded.scopes,tokens=excluded.tokens,expires_at=excluded.expires_at,refresh_lease=NULL,refresh_until=0`,
+    )
+      .bind(
+        crypto.randomUUID(),
+        row.user_id,
+        provider,
+        address,
+        subject,
+        granted.join(" "),
+        encrypted,
+        Date.now() + tokens.expires_in * 1000,
+      )
+      .run();
+    await notify(
+      env,
+      row.user_id,
+      "connection",
+      "Mailbox connected; live sending remains controlled by server configuration.",
+    );
+    return new Response(null, {
+      status: 303,
+      headers: {
+        Location: env.APP_ORIGIN + "/?connection=connected",
+        "Set-Cookie": `oauth_${provider}_${stateHash}=; HttpOnly; Secure; SameSite=Lax; Path=/api/oauth/${provider}/callback; Max-Age=0`,
+      },
+    });
+  } catch (error) {
+    // Fixed categories only: never serialize errors, requests, headers or provider payloads.
+    console.warn("oauth_callback_failure", category);
+    throw error;
+  }
 }
 export async function accessToken(
   env: Env,

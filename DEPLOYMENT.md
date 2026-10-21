@@ -1,6 +1,6 @@
 # No-card deployment and integration runbook
 
-Prepared 2026-10-21 for private repository `Malang43/MS-Professor-Agent`. The application is prepared, not deployed. Default production uses **Vercel Hobby + Workers Free + D1 Free + Workers KV Free**. No card, trial, paid upgrade, R2 subscription, purchased domain or real professor outreach is authorized. If an account/setup step requires payment details or an ineligible plan, stop that step and report it. No unlimited free usage is promised.
+Prepared 2026-10-21 for private repository `Malang43/MS-Professor-Agent`. The mock-default application was deployed with explicit authorization on 2026-10-21. See [the production deployment report](docs/DEPLOYMENT-STATUS.md) for live URLs, resource IDs, verification results, and remaining tasks. Default production uses **Vercel Hobby + Workers Free + D1 Free + Workers KV Free**. No card, trial, paid upgrade, R2 subscription, purchased domain or real professor outreach is authorized. If an account/setup step requires payment details or an ineligible plan, stop that step and report it. No unlimited free usage is promised.
 
 ## Current readiness
 
@@ -8,13 +8,13 @@ Prepared 2026-10-21 for private repository `Malang43/MS-Professor-Agent`. The ap
 | --- | --- |
 | Profiles, imports, dashboard, approvals, UTC scheduling, mock drafting/delivery and audit | Implemented; existing tests preserved |
 | KV uploads/downloads/deletion, quotas, expiry and cleanup | Implemented; fault tests and real local Worker smoke check passed |
-| Same-origin Vercel proxy, cookies, CSRF and no-store | Local HTTP tests/build checked; actual edge/browser validation pending |
+| Same-origin Vercel proxy, cookies, CSRF and no-store | Production Chromium signup/login/logout, import, upload/download/delete, isolation, CSRF and no-store checks passed; small-height sidebar limitation recorded |
 | Gmail/Outlook OAuth, encrypted tokens, refresh/disconnect and API adapters | Implemented and mocked-tested; registrations, credentials, consent and live certification missing |
 | Outbox, claims, quotas, uncertain reconciliation, replies and capped follow-up | Implemented with mocked-provider tests; live sending disabled |
 | Groq | Optional safe template selection implemented; key/model/free-account confirmation missing; fallback works |
-| Cloudflare access | Wrangler reports **not authenticated**; no account selected or resources created |
-| Vercel access | No local Vercel CLI found; browser/GitHub connection not used to deploy |
-| Production | Not deployed or verified; real sending remains off |
+| Cloudflare access | Authenticated account; Workers Free confirmed by owner; D1 and KV created and migrated, Worker deployed; no R2 |
+| Vercel access | Authenticated as malang43; m-farhat-mehdi Hobby scope verified; frontend deployed using CLI |
+| Production | Mock production verified; OAuth enabled for connection testing; real sending and Groq remain off |
 
 ## Exact Vercel settings and proxy
 
@@ -40,7 +40,7 @@ Keep the platform-level rewrite in **`apps/web/vercel.json`**:
 /api/:path* -> https://ms-professor-outreach-api.YOUR_WORKERS_SUBDOMAIN.workers.dev/api/:path*
 ```
 
-Replace `REPLACE_WITH_WORKERS_SUBDOMAIN` with the verified endpoint, retaining `/api` on both sides. `vercel.json` does not substitute arbitrary Worker environment variables. The fixed upstream is never chosen from client input. Production browser fetches and download links always remain on the Vercel origin; a stale frontend env value cannot bypass the proxy. Development supports `NEXT_PUBLIC_API_URL=http://localhost:8787`. Plain static servers and `next dev` do not execute Vercel rewrites.
+The deployed rewrite uses `https://ms-professor-outreach-api.aliraza57616.workers.dev/api/:path*`. For another account, replace the hostname with its verified endpoint, retaining `/api` on both sides. `vercel.json` does not substitute arbitrary Worker environment variables. The fixed upstream is never chosen from client input. Production browser fetches and download links always remain on the Vercel origin; a stale frontend env value cannot bypass the proxy. Development supports `NEXT_PUBLIC_API_URL=http://localhost:8787`. Plain static servers and `next dev` do not execute Vercel rewrites.
 
 Do not add a Vercel Function/middleware proxy, `next start`, or global trailing-slash redirects. Preview/deployment aliases are not the canonical origin. Do not whitelist `*.vercel.app`, inject a trusted Origin, or connect untrusted previews to production data. Disable unwanted previews/access or separately isolate staging D1/KV/Worker and its exact origin. A private source repo does not make the hosted site private.
 
@@ -50,7 +50,7 @@ The session cookie is host-only `HttpOnly; Secure; SameSite=Strict; Path=/`, sev
 
 Mutations require exact `APP_ORIGIN`; missing/null/foreign/Preview origins fail. Wrong Origin GETs fail too; ordinary owner-authenticated downloads may omit Origin. No state-changing GET or forwarded-host trust was introduced. Non-browser clients can spoof Origin, so session and tenant ownership checks remain mandatory.
 
-OAuth's provider redirect cannot rely on the Strict session cookie. A separate **10-minute**, host-only HttpOnly/Secure/**Lax** cookie is narrowly scoped to `/api/oauth/PROVIDER/callback`. One-use hashed state binds it to the student and initiating active/unrevoked session. PKCE verifiers and tokens are AES-GCM encrypted with user/provider/purpose AAD. Replays, missing binding and revoked/expired sessions fail before exchange. `Referrer-Policy: no-referrer` prevents callback URL referrer leaks. Do not log OAuth query codes, tokens or provider response bodies.
+OAuth's provider redirect cannot rely on the Strict session cookie. A separate **10-minute**, host-only HttpOnly/Secure/**Lax** cookie is narrowly scoped to `/api/oauth/PROVIDER/callback`. The OAuth fix names it `oauth_PROVIDER_STATEHASH`, using the full SHA-256 hash of the random state, so overlapping consent attempts do not overwrite each other. See [the OAuth investigation](docs/OAUTH-CALLBACK-FIX.md) for evidence and rollout requirements. One-use hashed state binds it to the student and initiating active/unrevoked session. PKCE verifiers and tokens are AES-GCM encrypted with user/provider/purpose AAD. Replays, missing binding and revoked/expired sessions fail before exchange. `Referrer-Policy: no-referrer` prevents callback URL referrer leaks. Do not log OAuth query codes, tokens or provider response bodies.
 
 Every Worker response, including errors/preflight/files/redirects, has:
 
@@ -127,7 +127,7 @@ The live snapshot freezes recipient, content, selected account, attachments/chec
 
 Timeout/network/5xx ambiguity or an interrupted submitting lease becomes **uncertain**, never blindly resent. Gmail reconciliation uses stable RFC Message-ID; Graph uses a custom outreach header in recent Sent Items. Graph 202 means accepted, not confirmed. Its bounded lookup examines the most recent 25 sent items; absent/ambiguous evidence stays uncertain and requires review. Cancellation cannot undo an already accepted provider request.
 
-Reply checks cover tracked threads for 30 days, one thread and one new event per cron phase (manual user-scoped checks may inspect two threads). Graph pagination persists. Incomplete/oversized/failed reads cannot arm follow-ups. One optional exact-content follow-up can be explicitly authorized for 7–10 UTC elapsed days after confirmation, shown during review and bound to the same recipient/account/files. It requires a fresh complete reply check; known reply/decline/opt-out/bounce, disconnection, cancellation and manual outcomes stop it. Out-of-thread bounces and replies beyond the polling window need manual recording. This is not universal inbox/DSN classification. Manual reminders remain separate.
+Reply checks cover tracked threads for 30 days, one thread and one new event per cron phase (manual user-scoped checks may inspect two threads). Graph pagination persists. Incomplete/oversized/failed reads cannot arm follow-ups. One optional exact-content follow-up can be explicitly authorized for 7-10 UTC elapsed days after confirmation, shown during review and bound to the same recipient/account/files. It requires a fresh complete reply check; known reply/decline/opt-out/bounce, disconnection, cancellation and manual outcomes stop it. Out-of-thread bounces and replies beyond the polling window need manual recording. This is not universal inbox/DSN classification. Manual reminders remain separate.
 
 Workers Free currently has a 10 ms CPU budget. Native hashing, file checks and provider work need real platform measurement after approval. Local wall times do not certify CPU fitness. Never weaken password hashing or upgrade to hide failure. Watch Worker/D1/KV quotas; no paid queue/durable-object service is enabled.
 
@@ -136,7 +136,7 @@ Workers Free currently has a 10 ms CPU budget. Native hashing, file checks and p
 All required external inputs/approvals are here. Never paste secrets into chat, Git, frontend variables, screenshots or logs.
 
 - [ ] **Review and authorize:** review local commit/diff; separately authorize push and no-card deployment. Check auto-deploy hooks and personal/noncommercial Hobby eligibility. Keep source private; never force-push.
-- [ ] **Authenticate Cloudflare:** approve interactive Wrangler sign-in, identify intended account/Free plan, then approve only D1/KV creation, migrations and deployment. Stop if a card/trial/paid plan is required. Wrangler is currently unauthenticated; no resources have been created.
+- [ ] **Authenticate Cloudflare:** approve interactive Wrangler sign-in, identify intended account/Free plan, then approve only D1/KV creation, migrations and deployment. Stop if a card/trial/paid plan is required. Completed for this deployment; exact resources and account scope are recorded in docs/DEPLOYMENT-STATUS.md.
 - [ ] **Fill production configuration:** supply/confirm canonical Vercel URL and Worker subdomain; replace D1/KV IDs and rewrite placeholder; configure exact APP_ORIGIN. Deploy backend before frontend, integrations/live flags initially off.
 - [ ] **Browser/edge QA:** verify login/refresh/logout/revoked-token 401, Vercel-host-only HttpOnly/Secure/Strict cookie, unchanged Cookie/Set-Cookie and original Origin forwarding. All API/download links stay under `/api` without slash/host redirects. Test two accounts, foreign file 404, upload/download/delete byte integrity, retry/expiry behavior, no shared edge HIT/STALE, wrong/missing/null Origin rejection, imports and all mock approval/control/scheduling modes. Check actual upload limits and CPU/quotas. If edge behavior differs, investigate rather than relaxing guards.
 - [ ] **Optional encryption secret:** generate/store 32 random bytes as base64 in a secure password manager. After remote-change approval use interactive `npx wrangler secret put TOKEN_ENCRYPTION_KEY` from `apps/api`. Never print or commit it. Ciphertext is version v1; key rotation/loss needs reviewed reconnect/re-encryption, not silent replacement.

@@ -5,8 +5,8 @@
   "preview_urls": false,
   "compatibility_date": "2026-10-01",
   "vars": {
-    "APP_ORIGIN": "http://localhost:3000",
-    "OAUTH_ENABLED": "false",
+    "APP_ORIGIN": "https://ms-professor-agent-malang43.vercel.app",
+    "OAUTH_ENABLED": "true",
     "LIVE_EMAIL_ENABLED": "false",
     "AI_PROVIDER": "mock",
     "GROQ_FREE_PLAN_CONFIRMED": "false",
@@ -15,12 +15,12 @@
     {
       "binding": "DB",
       "database_name": "outreach",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "684cb48c-3f43-4cef-8217-cf9624d23522",
       "migrations_dir": "migrations",
     },
   ],
   "kv_namespaces": [
-    { "binding": "DOCUMENTS_KV", "id": "00000000000000000000000000000000" },
+    { "binding": "DOCUMENTS_KV", "id": "522d30d6935741b0b659d92b3136ec8c" },
   ],
   "triggers": { "crons": ["* * * * *"] },
   "env": {
