@@ -42,7 +42,7 @@ export async function providerRequest(
     response = await network(url, {
       ...init,
       signal: AbortSignal.timeout(15000),
-      redirect: "error",
+      redirect: "manual",
     });
   } catch {
     throw new ProviderError(sending ? "uncertain" : "retry");
@@ -98,8 +98,28 @@ export async function oauthTokenRequest(
 ): Promise<any> {
   let status = 0;
   let reported = false;
+  let failure = "request_setup_exception";
   const observed: Fetcher = async (input, options) => {
-    const response = await network(input, options);
+    failure = "request_validation_exception";
+    // Validate locally so Request construction failures are not called network failures.
+    new Request(input, options);
+    failure = "fetch_exception";
+    let response: Response;
+    try {
+      response = await network(input, options);
+    } catch (error) {
+      // Names are reduced to fixed categories; never log messages, stacks or causes.
+      failure =
+        error instanceof DOMException && error.name === "TimeoutError"
+          ? "fetch_timeout"
+          : error instanceof DOMException && error.name === "AbortError"
+            ? "fetch_aborted"
+            : error instanceof TypeError
+              ? "fetch_type_error"
+              : "fetch_exception";
+      throw error;
+    }
+    failure = "response_processing_exception";
     status = response.status;
     if (!response.ok) {
       let category = "unrecognized_error";
@@ -161,7 +181,7 @@ export async function oauthTokenRequest(
       console.warn(
         "oauth_token_exchange_failure",
         status,
-        status ? "success_body_unreadable" : "transport_failure",
+        status ? "success_body_unreadable" : failure,
       );
     throw error;
   }

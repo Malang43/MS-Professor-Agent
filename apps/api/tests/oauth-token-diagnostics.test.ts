@@ -62,7 +62,7 @@ it("does not expose transport exception text or retry", async () => {
   expect(warn).toHaveBeenCalledExactlyOnceWith(
     "oauth_token_exchange_failure",
     0,
-    "transport_failure",
+    "fetch_exception",
   );
   expect(network).toHaveBeenCalledTimes(1);
 });
@@ -93,3 +93,79 @@ it("does not log successful token payloads", async () => {
   ).toEqual(tokens);
   expect(warn).not.toHaveBeenCalled();
 });
+
+it.each([
+  [new DOMException("PRIVATE", "TimeoutError"), "fetch_timeout"],
+  [new DOMException("PRIVATE", "AbortError"), "fetch_aborted"],
+  [new TypeError("PRIVATE"), "fetch_type_error"],
+])(
+  "classifies fetch rejections without error text",
+  async (error, category) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const network = vi.fn(async () => {
+      throw error;
+    });
+    await expect(
+      oauthTokenRequest("https://oauth2.googleapis.com/token", {}, network),
+    ).rejects.toThrow();
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "oauth_token_exchange_failure",
+      0,
+      category,
+    );
+    expect(network).toHaveBeenCalledTimes(1);
+  },
+);
+it("attributes local timeout setup exceptions before fetch", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+    throw new TypeError("PRIVATE");
+  });
+  const network = vi.fn();
+  await expect(
+    oauthTokenRequest("https://oauth2.googleapis.com/token", {}, network),
+  ).rejects.toThrow();
+  expect(network).not.toHaveBeenCalled();
+  expect(warn).toHaveBeenCalledExactlyOnceWith(
+    "oauth_token_exchange_failure",
+    0,
+    "request_setup_exception",
+  );
+});
+it("attributes malformed local requests before fetch", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const network = vi.fn();
+  await expect(oauthTokenRequest("not a URL", {}, network)).rejects.toThrow();
+  expect(network).not.toHaveBeenCalled();
+  expect(warn).toHaveBeenCalledExactlyOnceWith(
+    "oauth_token_exchange_failure",
+    0,
+    "request_validation_exception",
+  );
+});
+it.each([301, 302, 303, 307, 308])(
+  "rejects redirect %s without following or retrying",
+  async (status) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const network = vi.fn(async (_url: any, options: any) => {
+      expect(options.redirect).toBe("manual");
+      return new Response(null, {
+        status,
+        headers: { Location: "https://attacker.invalid/" },
+      });
+    });
+    await expect(
+      oauthTokenRequest(
+        "https://oauth2.googleapis.com/token",
+        { method: "POST", body: "synthetic" },
+        network,
+      ),
+    ).rejects.toMatchObject({ kind: "rejected" });
+    expect(network).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "oauth_token_exchange_failure",
+      status,
+      "error_body_unreadable",
+    );
+  },
+);
