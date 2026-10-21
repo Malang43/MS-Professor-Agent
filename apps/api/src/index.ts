@@ -281,7 +281,7 @@ async function route(req: Request, env: Env): Promise<Response> {
           .bind(user, Date.now())
           .all(),
         env.DB.prepare(
-          "SELECT m.*,p.name professor_name,p.email professor_email FROM messages m JOIN professors p ON p.id=m.professor_id WHERE m.user_id=? ORDER BY m.created_at DESC",
+          "SELECT m.*,p.name professor_name,COALESCE(CASE WHEN json_valid(t.snapshot) THEN json_extract(t.snapshot,'$.recipient') END,p.email) professor_email FROM messages m JOIN professors p ON p.id=m.professor_id LEFT JOIN transports t ON t.message_id=m.id WHERE m.user_id=? ORDER BY m.created_at DESC",
         )
           .bind(user)
           .all(),
@@ -392,19 +392,27 @@ async function route(req: Request, env: Env): Promise<Response> {
         409,
         "A professor with that email is already on your shortlist.",
       );
-    await env.DB.batch([
-      env.DB.prepare(
-        "UPDATE professors SET name=?,email=?,university=?,interests=?,source_url=NULL,verified_at=NULL WHERE id=? AND user_id=?",
-      ).bind(
+    const edited = await env.DB.prepare(
+      "UPDATE professors SET name=?,email=?,university=?,interests=?,source_url=NULL,verified_at=NULL WHERE id=? AND user_id=? AND (email=? OR NOT EXISTS(SELECT 1 FROM messages WHERE professor_id=? AND user_id=?)) RETURNING id",
+    )
+      .bind(
         input.name,
         input.email,
         input.university,
         input.interests,
         professorEdit[1],
         user,
-      ),
-      audit(env, user, "professor.updated", professorEdit[1]),
-    ]);
+        input.email,
+        professorEdit[1],
+        user,
+      )
+      .first();
+    if (!edited)
+      throw new HttpError(
+        409,
+        "The email address is fixed once outreach exists. Add a new professor record for a different address.",
+      );
+    await audit(env, user, "professor.updated", professorEdit[1]).run();
     return json({ ok: true });
   }
   const professorVerify = path.match(/^\/api\/professors\/([^/]+)\/verify$/);

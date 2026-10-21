@@ -561,3 +561,93 @@ it("attempts Google revocation only through a bounded non-redirecting request", 
   ).toBe(false);
   expect(network).toHaveBeenCalledTimes(1);
 });
+
+it("keeps a professor email stable once reviewed outreach exists", async () => {
+  const user = await h.user();
+  await h.request(
+    "/professors",
+    "POST",
+    [{ name: "Research Professor", email: "original@example.edu" }],
+    user.session,
+  );
+  const professor = h.db.prepare("SELECT id FROM professors").get()!.id;
+  await h.request(
+    "/messages",
+    "POST",
+    {
+      professor_id: professor,
+      subject: "Approved recipient",
+      body: "Private draft",
+      mode: "manual",
+      scheduled_at: "2099-01-01T00:00:00.000Z",
+      timezone: "UTC",
+      attachments: [],
+    },
+    user.session,
+  );
+  expect(
+    (
+      await h.request(
+        "/professors/" + professor,
+        "PUT",
+        { name: "Research Professor", email: "changed@example.edu" },
+        user.session,
+      )
+    ).status,
+  ).toBe(409);
+  expect(
+    h.db.prepare("SELECT email FROM professors WHERE id=?").get(professor)!
+      .email,
+  ).toBe("original@example.edu");
+});
+
+it("displays the frozen live recipient even if a legacy professor record changed", async () => {
+  const user = await h.user();
+  await h.request(
+    "/professors",
+    "POST",
+    [{ name: "Professor", email: "original@example.edu" }],
+    user.session,
+  );
+  const professor = h.db.prepare("SELECT id FROM professors").get()!.id;
+  const response = await h.request(
+    "/messages",
+    "POST",
+    {
+      professor_id: professor,
+      subject: "Review",
+      body: "Private content",
+      mode: "manual",
+      scheduled_at: "2099-01-01T00:00:00.000Z",
+      timezone: "UTC",
+      attachments: [],
+    },
+    user.session,
+  );
+  const message = ((await response.json()) as any).id;
+  const connection = crypto.randomUUID();
+  h.db
+    .prepare(
+      "INSERT INTO connections(id,user_id,provider,address,subject,scopes,expires_at) VALUES(?,?,'gmail','synthetic@example.invalid','synthetic','gmail.send',0)",
+    )
+    .run(connection, user.id);
+  h.db
+    .prepare(
+      "INSERT INTO transports(message_id,user_id,connection_id,snapshot) VALUES(?,?,?,?)",
+    )
+    .run(
+      message,
+      user.id,
+      connection,
+      JSON.stringify({ recipient: "original@example.edu" }),
+    );
+  h.db
+    .prepare(
+      "UPDATE professors SET email='legacy-changed@example.edu' WHERE id=?",
+    )
+    .run(professor);
+  const state = (await (
+    await h.request("/state", "GET", undefined, user.session)
+  ).json()) as any;
+  expect(state.messages[0].professor_email).toBe("original@example.edu");
+});
