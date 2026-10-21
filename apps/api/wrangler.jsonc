@@ -23,6 +23,10 @@
     { "binding": "DOCUMENTS_KV", "id": "522d30d6935741b0b659d92b3136ec8c" },
   ],
   "triggers": { "crons": ["* * * * *"] },
+  "observability": {
+    "redact_query_string": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+  },
   "env": {
     "local": {
       "name": "ms-professor-outreach-api-local",
