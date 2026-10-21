@@ -18,6 +18,20 @@ For the October 21 live quota, Gmail and stopped-outreach investigation, see [PR
 | Vercel access | Authenticated as malang43; m-farhat-mehdi Hobby scope verified; frontend deployed using CLI |
 | Production | Mock production verified; OAuth enabled for connection testing; real sending and Groq remain off |
 
+## Temporary administrator OAuth test allowance
+
+The server-only `OAUTH_ADMIN_TEST_USER_IDS` configuration permits **15 OAuth connection starts per UTC day** for explicitly allowlisted existing account IDs. All other accounts retain **5**, and the application-wide limit remains **50**. Gmail and Outlook share the same account budget. This grants no other administrator privileges and does not enable sending or AI.
+
+The designated test email was resolved through a read-only D1 lookup to its existing immutable account ID. The prepared allowlist contains only that ID in ignored `apps/api/.wrangler/oauth-admin-test-config.json`; no personal identifier is embedded in application source or `.env.example`. Request bodies, profile names, email claims and client-side flags cannot set this configuration or override the authenticated user ID. An absent/empty/unmatched allowlist retains the normal limit.
+
+Existing `usage_counters` keys, values and UTC periods are reused unchanged. At a count of 5, an allowlisted account receives at most 10 additional starts, subject to the shared global allowance. Failed/cancelled attempts still count. There is no quota reset or separate fresh administrator counter.
+
+Per owner preference, the override remains until explicitly removed. Clearing/removing the allowlist restores 5 without rewriting usage; an account already above 5 must wait for the next UTC period. It does not cancel an already started OAuth flow or change PKCE/state/session/cookie validation.
+
+The owner approved pushing/deploying the reviewed Worker fix and activating the prepared server-side allowlist on October 21. Keep `OAUTH_ENABLED=true`, `LIVE_EMAIL_ENABLED=false`, `AI_PROVIDER=mock`, existing credential secrets and exact APP_ORIGIN unchanged. No migration, resource creation, quota reset, frontend deployment or credential change is needed. Do not put this variable in NEXT_PUBLIC_ settings or a user-editable profile. Only the designated account receives 15 when this configuration is active; verify its exact membership after deployment.
+
+Validation: **88 tests passed**, both workspace TypeScript checks and production build passed. Nine new tests cover existing-count preservation, shared-provider 15 cap, ordinary students/forged identity fields, absent/empty/email/unmatched configuration, global 50 cap, removal/next UTC period, and concurrent attempts at the boundary. Release approval was subsequently given; production verification must confirm unchanged counters, protected credential bindings and exact single-account membership.
+
 ## Exact Vercel settings and proxy
 
 Install from repository root with Node 24 LTS and `npm ci`. The frontend root is **`apps/web`**. Next.js keeps `output: "export"`, generates `apps/web/out`, and disables slash redirects so API paths remain unchanged. Worker code is `apps/api/src/index.ts`; migrations are `apps/api/migrations`.

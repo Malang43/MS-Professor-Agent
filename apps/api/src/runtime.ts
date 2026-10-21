@@ -4,6 +4,7 @@ export interface Env {
   DOCUMENTS?: R2Bucket; // Optional legacy adapter, not a production dependency.
   APP_ORIGIN: string;
   OAUTH_ENABLED?: string;
+  OAUTH_ADMIN_TEST_USER_IDS?: string; // Server-only account IDs; OAuth start budget only.
   LIVE_EMAIL_ENABLED?: string;
   LIVE_TEST_RECIPIENTS?: string;
   TOKEN_ENCRYPTION_KEY?: string;

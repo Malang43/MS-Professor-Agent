@@ -223,3 +223,171 @@ describe("production quota reporting and outreach independence", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 });
+
+describe("server-only administrator OAuth test allowance", () => {
+  it("allows only ten additional starts from an existing count of five, then blocks at fifteen", async () => {
+    const admin = await h.user("admin-test@example.invalid");
+    h.env.OAUTH_ADMIN_TEST_USER_IDS = admin.id;
+    h.db
+      .prepare("INSERT INTO usage_counters VALUES(?,'2026-10-21',5)")
+      .run("oauth:" + admin.id);
+    h.db
+      .prepare(
+        "INSERT INTO usage_counters VALUES('oauth:global','2026-10-21',5)",
+      )
+      .run();
+    for (let i = 0; i < 10; i++)
+      expect(
+        (await start(admin.session, i % 2 ? "outlook" : "gmail")).status,
+      ).toBe(200);
+    const blocked = await start(admin.session);
+    expect(blocked.status).toBe(429);
+    expect((await blocked.json()).error).toContain("15 starts per account");
+    expect(blocked.headers.get("Retry-After")).toBe("43170");
+    expect(
+      h.db
+        .prepare(
+          "SELECT amount FROM usage_counters WHERE scope=? AND period='2026-10-21'",
+        )
+        .get("oauth:" + admin.id)!.amount,
+    ).toBe(15);
+    expect(
+      h.db
+        .prepare("SELECT amount FROM usage_counters WHERE scope='oauth:global'")
+        .get()!.amount,
+    ).toBe(15);
+    expect(
+      h.db.prepare("SELECT COUNT(*) AS n FROM oauth_states").get()!.n,
+    ).toBe(10);
+  });
+  it("keeps every non-allowlisted student at five despite forged administrator identity fields", async () => {
+    const admin = await h.user("admin-test@example.invalid"),
+      student = await h.user("student-test@example.invalid");
+    h.env.OAUTH_ADMIN_TEST_USER_IDS = admin.id;
+    h.db
+      .prepare("UPDATE profiles SET name=? WHERE user_id=?")
+      .run("admin-test@example.invalid", student.id);
+    h.db
+      .prepare("INSERT INTO usage_counters VALUES(?,'2026-10-21',5)")
+      .run("oauth:" + student.id);
+    const response = await h.request(
+      "/connections/gmail/start",
+      "POST",
+      {
+        read_replies: true,
+        email: "admin-test@example.invalid",
+        user_id: admin.id,
+        admin: true,
+        limit: 15,
+      },
+      student.session,
+    );
+    expect(response.status).toBe(429);
+    expect((await response.json()).error).toContain("5 starts per account");
+    expect(
+      h.db
+        .prepare("SELECT amount FROM usage_counters WHERE scope=?")
+        .get("oauth:" + student.id)!.amount,
+    ).toBe(5);
+    expect(
+      h.db.prepare("SELECT COUNT(*) AS n FROM oauth_states").get()!.n,
+    ).toBe(0);
+  });
+  it.each([undefined, "", "admin-test@example.invalid", "not-an-account-id"])(
+    "defaults to five when allowlist is absent, empty, an email or an unrelated ID (%s)",
+    async (list) => {
+      const admin = await h.user("admin-test@example.invalid");
+      h.env.OAUTH_ADMIN_TEST_USER_IDS = list;
+      h.db
+        .prepare("INSERT INTO usage_counters VALUES(?,'2026-10-21',5)")
+        .run("oauth:" + admin.id);
+      const response = await start(admin.session);
+      expect(response.status).toBe(429);
+      expect((await response.json()).error).toContain("5 starts per account");
+    },
+  );
+  it("preserves the global fifty-start limit even for the allowlisted administrator", async () => {
+    const admin = await h.user("admin-test@example.invalid");
+    h.env.OAUTH_ADMIN_TEST_USER_IDS = admin.id;
+    h.db
+      .prepare(
+        "INSERT INTO usage_counters VALUES('oauth:global','2026-10-21',50)",
+      )
+      .run();
+    const response = await start(admin.session);
+    expect(response.status).toBe(429);
+    expect((await response.json()).error).toContain(
+      "50 starts application-wide",
+    );
+    expect(
+      h.db
+        .prepare("SELECT amount FROM usage_counters WHERE scope='oauth:global'")
+        .get()!.amount,
+    ).toBe(50);
+    expect(
+      h.db.prepare("SELECT COUNT(*) AS n FROM oauth_states").get()!.n,
+    ).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("restores five on removal without rewinding counters, then uses the normal next-day budget", async () => {
+    const admin = await h.user("admin-test@example.invalid");
+    h.env.OAUTH_ADMIN_TEST_USER_IDS = " , " + admin.id + ", ";
+    h.db
+      .prepare("UPDATE sessions SET expires_at=?")
+      .run(Date.parse("2026-10-23T00:00:00Z"));
+    h.db
+      .prepare("INSERT INTO usage_counters VALUES(?,'2026-10-21',5)")
+      .run("oauth:" + admin.id);
+    expect((await start(admin.session)).status).toBe(200);
+    delete h.env.OAUTH_ADMIN_TEST_USER_IDS;
+    const blocked = await start(admin.session);
+    expect(blocked.status).toBe(429);
+    expect((await blocked.json()).error).toContain("5 starts per account");
+    expect(
+      h.db
+        .prepare(
+          "SELECT amount FROM usage_counters WHERE scope=? AND period='2026-10-21'",
+        )
+        .get("oauth:" + admin.id)!.amount,
+    ).toBe(6);
+    vi.setSystemTime(new Date("2026-10-22T00:00:00Z"));
+    expect((await start(admin.session)).status).toBe(200);
+    expect(
+      h.db
+        .prepare(
+          "SELECT amount FROM usage_counters WHERE scope=? AND period='2026-10-22'",
+        )
+        .get("oauth:" + admin.id)!.amount,
+    ).toBe(1);
+  });
+  it("atomically admits only one concurrent administrator start at the fifteen-start boundary", async () => {
+    const admin = await h.user("admin-test@example.invalid");
+    h.env.OAUTH_ADMIN_TEST_USER_IDS = admin.id;
+    h.db
+      .prepare("INSERT INTO usage_counters VALUES(?,'2026-10-21',14)")
+      .run("oauth:" + admin.id);
+    h.db
+      .prepare(
+        "INSERT INTO usage_counters VALUES('oauth:global','2026-10-21',49)",
+      )
+      .run();
+    const responses = await Promise.all([
+      start(admin.session),
+      start(admin.session, "outlook"),
+    ]);
+    expect(responses.map((r) => r.status).sort()).toEqual([200, 429]);
+    expect(
+      h.db
+        .prepare("SELECT amount FROM usage_counters WHERE scope=?")
+        .get("oauth:" + admin.id)!.amount,
+    ).toBe(15);
+    expect(
+      h.db
+        .prepare("SELECT amount FROM usage_counters WHERE scope='oauth:global'")
+        .get()!.amount,
+    ).toBe(50);
+    expect(
+      h.db.prepare("SELECT COUNT(*) AS n FROM oauth_states").get()!.n,
+    ).toBe(1);
+  });
+});

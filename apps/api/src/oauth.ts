@@ -135,6 +135,15 @@ export async function startOAuth(
     state = random(),
     verifier = random(),
     binding = random();
+  // Identity comes from the authenticated session, never request/profile fields.
+  // Removing an ID restores the normal limit without deleting its usage row.
+  const accountLimit = (env.OAUTH_ADMIN_TEST_USER_IDS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .includes(user)
+    ? 15
+    : 5;
   const period = new Date().toISOString().slice(0, 10);
   const reset = new Date(
     Date.parse(period + "T00:00:00.000Z") + 86400000,
@@ -142,7 +151,7 @@ export async function startOAuth(
   for (const [scope, limit, category, label] of [
     [
       `oauth:${user}`,
-      5,
+      accountLimit,
       "account_quota",
       "per account (shared by Gmail and Outlook)",
     ],
