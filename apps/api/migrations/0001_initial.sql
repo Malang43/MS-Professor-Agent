@@ -1,0 +1,14 @@
+PRAGMA foreign_keys = ON;
+CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE sessions (token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL);
+CREATE TABLE profiles (user_id TEXT PRIMARY KEY REFERENCES users(id), name TEXT NOT NULL DEFAULT '', university TEXT NOT NULL DEFAULT '', degree TEXT NOT NULL DEFAULT '', gpa TEXT NOT NULL DEFAULT '', interests TEXT NOT NULL DEFAULT '', timezone TEXT NOT NULL DEFAULT 'Asia/Karachi', paused INTEGER NOT NULL DEFAULT 0, stopped INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE professors (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, email TEXT NOT NULL, university TEXT NOT NULL DEFAULT '', interests TEXT NOT NULL DEFAULT '', UNIQUE(user_id,email), UNIQUE(id,user_id));
+CREATE TABLE documents (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, object_key TEXT NOT NULL UNIQUE, content_type TEXT NOT NULL, size INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(id,user_id));
+CREATE TABLE messages (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), professor_id TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('manual','review','auto')), authorized INTEGER NOT NULL DEFAULT 0, approved INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','pending','sent','replied','failed','cancelled')), scheduled_at TEXT NOT NULL, timezone TEXT NOT NULL, followup_at TEXT, sent_at TEXT, error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(professor_id,user_id) REFERENCES professors(id,user_id), UNIQUE(id,user_id));
+CREATE TABLE message_attachments (message_id TEXT NOT NULL, document_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(message_id,document_id), FOREIGN KEY(message_id,user_id) REFERENCES messages(id,user_id), FOREIGN KEY(document_id,user_id) REFERENCES documents(id,user_id));
+CREATE TABLE deliveries (message_id TEXT PRIMARY KEY REFERENCES messages(id), provider TEXT NOT NULL DEFAULT 'mock', provider_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE audit (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), action TEXT NOT NULL, entity_id TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE login_attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, reset_at INTEGER NOT NULL);
+CREATE INDEX messages_due ON messages(status,scheduled_at);
+CREATE INDEX messages_owner ON messages(user_id);
+CREATE INDEX audit_owner ON audit(user_id,created_at);

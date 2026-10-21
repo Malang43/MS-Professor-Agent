@@ -1,0 +1,16 @@
+{
+  "name": "ms-professor-outreach-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "vars": { "APP_ORIGIN": "http://localhost:3000" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "outreach",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "r2_buckets": [{ "binding": "DOCUMENTS", "bucket_name": "outreach-private" }],
+  "triggers": { "crons": ["* * * * *"] },
+}
