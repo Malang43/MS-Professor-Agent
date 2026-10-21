@@ -623,6 +623,18 @@ describe("same-origin API reverse proxy", () => {
         (await api("/auth/logout", "GET", undefined, cookieA, null)).status,
       ).toBe(405);
       expect((await api("/state", "GET", undefined, cookieA)).status).toBe(200);
+      const rootHeaders = proxyConfig.headers.find(
+        (rule: { source: string }) => rule.source === "/",
+      )?.headers;
+      expect(rootHeaders).toEqual(
+        expect.arrayContaining([
+          { key: "X-Frame-Options", value: "DENY" },
+          expect.objectContaining({
+            key: "Content-Security-Policy",
+            value: expect.stringContaining("frame-ancestors 'none'"),
+          }),
+        ]),
+      );
       const configuredHeaders = Object.fromEntries(
         proxyConfig.headers
           .find((rule: { source: string }) => rule.source === "/api/:path*")!
