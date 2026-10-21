@@ -78,3 +78,6 @@ tokens/
 *.sqlite.gz
 *.swp
 *~
+
+# Wrangler CLI generated release-folder marker (actual artifacts remain under .wrangler).
+/studio-release-build/

@@ -4,9 +4,11 @@
 
 - Application/security implementation: GitHub main commit `81b206ab2f62edbcb54b700559ec0a4e34731a39`.
 - Root security-header follow-up: `98d2e45e8e0cee9054502e55d07dae0dd654b8bf`.
-- Cloudflare Worker version: `f01550ca-cb43-48e2-8049-25f9f9aef7bb`, verified active at 100%.
-- Worker SHA-256: `e0ede221e301494ff89d007749ecadac9c11f0f95957458a21c021c5ad5806e2`; downloaded production module matched the prepared artifact exactly.
+- Recipient-integrity safety follow-up: `f0825264b4d33b38176bc3e8aba1866bd535772c`.
+- Cloudflare Worker version: `b1b7a3fe-90aa-4ed0-8718-8b6c8d04d08f`, verified active at 100%.
+- Worker SHA-256: `ad3e15173af9388f504dcd3ae102736a218dae1b7c0e624f0923c67f1414146e`; downloaded production module matched the prepared artifact exactly.
 - Vercel application deployment: `dpl_CvtkGTQza2AvPNMj26sqrAmRQVvH`; root-header follow-up `dpl_6zsbhmc3ue9gfJkcBanRbVuUEMGf`, READY/PROMOTED, source Git, commit `98d2e45e8e0cee9054502e55d07dae0dd654b8bf`.
+- Vercel safety follow-up: `dpl_82KaynbP4s4QHspdwKj7ifyhP6v1`, READY, Git commit `f0825264b4d33b38176bc3e8aba1866bd535772c`; frontend files are unchanged by this backend-only patch.
 - Canonical live URL: https://ms-professor-agent-malang43.vercel.app
 - Existing Worker endpoint: https://ms-professor-outreach-api.aliraza57616.workers.dev
 - Source repository remains PRIVATE: https://github.com/Malang43/MS-Professor-Agent
@@ -17,7 +19,7 @@ This report may be committed after the application release; documentation-only c
 
 | Check                         | Result                                                                                                                                                                                                                                                                             |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Automated suite               | 134 passed, including all pre-existing suites                                                                                                                                                                                                                                      |
+| Automated suite               | 136 passed, including all pre-existing suites                                                                                                                                                                                                                                      |
 | TypeScript / production build | Both workspaces and Next.js export passed                                                                                                                                                                                                                                          |
 | Dependency audits             | Full and production audits: zero known vulnerabilities                                                                                                                                                                                                                             |
 | Workers runtime               | Offline synthetic exchange succeeds; 301/302/303/307/308 rejected without following; no Google OAuth calls                                                                                                                                                                         |
@@ -45,3 +47,5 @@ The initial Worker upload failed and the controlled retry succeeded. The first G
 5. Broader public readiness still requires malware scanning, stronger breached-password coverage, MFA, legal/privacy review and actual platform CPU/quota monitoring. The personal free-tier application is not an unlimited public-service or live-email certification.
 
 See [the release/security runbook](STUDIO-RELEASE.md) and [deployment instructions](../DEPLOYMENT.md) for configuration, retention, rollback and no-card boundaries.
+
+Final safety follow-up additionally proves that professor edits cannot change recipient addresses once outreach exists, and that live review/history always displays the immutable transport recipient even for legacy/racing professor changes. No new schema or counter reset was required. The final Worker artifact/configuration/data-preservation and health checks passed after this patch.
