@@ -4,6 +4,8 @@ Prepared 2026-10-21 for private repository `Malang43/MS-Professor-Agent`. The mo
 
 ## Current readiness
 
+For the October 21 live quota, Gmail and stopped-outreach investigation, see [PRODUCTION-DIAGNOSIS.md](docs/PRODUCTION-DIAGNOSIS.md). The owner OAuth allowance is 5 starts per UTC day, shared by Gmail and Outlook, including failed/cancelled attempts. The observed October 21 allowance resets October 22 at 05:00 AM Asia/Karachi. The quota reporting fix was approved for commit, push and Worker deployment on October 21; limits and existing credentials must remain unchanged.
+
 | Component | State |
 | --- | --- |
 | Profiles, imports, dashboard, approvals, UTC scheduling, mock drafting/delivery and audit | Implemented; existing tests preserved |

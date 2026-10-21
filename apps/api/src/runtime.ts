@@ -74,6 +74,21 @@ export async function consume(
   )
     .bind(scope, period, amount, amount, limit, limit)
     .first();
-  if (!row)
-    throw new HttpError(429, "Daily or interval quota reached. Try later.", 60);
+  if (!row) {
+    // Callers use UTC calendar-day or calendar-minute windows; never promise a
+    // one-minute retry for a quota that only changes at the next UTC day.
+    const end = /^\d{4}-\d{2}-\d{2}$/.test(period)
+      ? Date.parse(period + "T00:00:00.000Z") + 86400000
+      : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(period)
+        ? Date.parse(period + ":00.000Z") + 60000
+        : NaN;
+    const retry = Number.isFinite(end)
+      ? Math.max(1, Math.ceil((end - Date.now()) / 1000))
+      : 60;
+    throw new HttpError(
+      429,
+      "Daily or interval quota reached. Try later.",
+      retry,
+    );
+  }
 }

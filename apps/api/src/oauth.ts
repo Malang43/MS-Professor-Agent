@@ -135,8 +135,33 @@ export async function startOAuth(
     state = random(),
     verifier = random(),
     binding = random();
-  await consume(env, `oauth:${user}`, 5);
-  await consume(env, "oauth:global", 50);
+  const period = new Date().toISOString().slice(0, 10);
+  const reset = new Date(
+    Date.parse(period + "T00:00:00.000Z") + 86400000,
+  ).toISOString();
+  for (const [scope, limit, category, label] of [
+    [
+      `oauth:${user}`,
+      5,
+      "account_quota",
+      "per account (shared by Gmail and Outlook)",
+    ],
+    ["oauth:global", 50, "global_quota", "application-wide"],
+  ] as const) {
+    try {
+      await consume(env, scope, limit, 1, period);
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 429) {
+        console.warn("oauth_start_failure", category);
+        throw new HttpError(
+          429,
+          `OAuth connection attempt limit reached: ${limit} starts ${label} per UTC day. Resets at ${reset}. Failed or cancelled attempts count.`,
+          error.retryAfter,
+        );
+      }
+      throw error;
+    }
+  }
   const challenge = base64url(
     new Uint8Array(
       await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
