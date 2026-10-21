@@ -89,6 +89,84 @@ export async function providerRequest(
     throw new ProviderError(sending ? "uncertain" : "rejected");
   }
 }
+// This wrapper is used only for authorization-code exchange, never mailbox traffic.
+// Diagnostics contain fixed enums and a numeric status; provider text is discarded.
+export async function oauthTokenRequest(
+  url: string,
+  init: RequestInit,
+  network: Fetcher = fetch,
+): Promise<any> {
+  let status = 0;
+  let reported = false;
+  const observed: Fetcher = async (input, options) => {
+    const response = await network(input, options);
+    status = response.status;
+    if (!response.ok) {
+      let category = "unrecognized_error";
+      const reader = response.body?.getReader();
+      try {
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        if (reader)
+          while (true) {
+            const next = await reader.read();
+            if (next.done) break;
+            size += next.value.length;
+            if (size > 8192) {
+              category = "error_body_too_large";
+              await reader.cancel();
+              break;
+            }
+            chunks.push(next.value);
+          }
+        if (size <= 8192) {
+          const bytes = new Uint8Array(size);
+          let offset = 0;
+          for (const chunk of chunks) {
+            bytes.set(chunk, offset);
+            offset += chunk.length;
+          }
+          const parsed = JSON.parse(new TextDecoder().decode(bytes));
+          const allowed = [
+            "invalid_client",
+            "invalid_grant",
+            "invalid_request",
+            "unauthorized_client",
+            "unsupported_grant_type",
+            "invalid_scope",
+            "access_denied",
+            "server_error",
+            "temporarily_unavailable",
+          ];
+          if (
+            typeof parsed?.error === "string" &&
+            allowed.includes(parsed.error)
+          )
+            category = parsed.error;
+        }
+      } catch {
+        category = "error_body_unreadable";
+      } finally {
+        reader?.releaseLock();
+      }
+      console.warn("oauth_token_exchange_failure", status, category);
+      reported = true;
+    }
+    return response;
+  };
+  try {
+    return await providerRequest(url, init, observed);
+  } catch (error) {
+    if (!reported)
+      console.warn(
+        "oauth_token_exchange_failure",
+        status,
+        status ? "success_body_unreadable" : "transport_failure",
+      );
+    throw error;
+  }
+}
+
 export function oauthConfig(provider: ProviderName) {
   return provider === "gmail"
     ? {

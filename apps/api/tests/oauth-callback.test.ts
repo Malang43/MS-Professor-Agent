@@ -199,10 +199,19 @@ describe("OAuth callback lifecycle diagnostics and overlapping starts", () => {
             : 400,
     });
     expect(network).not.toHaveBeenCalled();
-    expect(console.warn).toHaveBeenCalledExactlyOnceWith(
+    expect(console.warn).toHaveBeenCalledWith(
       "oauth_callback_failure",
       category,
     );
+    expect(console.warn).toHaveBeenCalledTimes(
+      category === "token_exchange" ? 2 : 1,
+    );
+    if (category === "token_exchange")
+      expect(console.warn).toHaveBeenCalledWith(
+        "oauth_token_exchange_failure",
+        401,
+        "invalid_client",
+      );
   });
   it("rejects another attempt's binding without consuming either valid state", async () => {
     const user = await h.user();
@@ -252,6 +261,79 @@ describe("OAuth callback lifecycle diagnostics and overlapping starts", () => {
     expect(result.headers.get("Cache-Control")).toContain("no-store");
     expect(flow.auth.searchParams.get("redirect_uri")).toBe(
       h.env.APP_ORIGIN + "/api/oauth/gmail/callback",
+    );
+  });
+});
+
+describe("safe attribution of generic OAuth callback server failures", () => {
+  it.each([
+    "token_exchange",
+    "identity_request",
+    "token_encryption",
+    "connection_save",
+  ])("keeps the public error generic but records only %s", async (category) => {
+    const user = await h.user();
+    const flow = await attempt(user);
+    const normal = providerMock("gmail");
+    const network = vi.fn(async (url: any, init: any) => {
+      if (category === "token_exchange" && String(url).includes("/token"))
+        return Response.json(
+          {
+            error: "invalid_client",
+            error_description: "synthetic-sensitive-provider-detail",
+          },
+          { status: 401 },
+        );
+      if (category === "identity_request" && String(url).includes("/userinfo"))
+        return Response.json(
+          { error: "synthetic-sensitive-provider-detail" },
+          { status: 401 },
+        );
+      return normal(url, init);
+    });
+    vi.stubGlobal("fetch", network);
+    if (category === "token_encryption")
+      vi.spyOn(crypto.subtle, "encrypt").mockRejectedValueOnce(
+        new Error("synthetic-sensitive-encryption-detail"),
+      );
+    if (category === "connection_save") {
+      const prepare = h.env.DB.prepare.bind(h.env.DB);
+      h.env.DB.prepare = ((sql: string) => {
+        if (sql.includes("INSERT INTO connections"))
+          throw new Error("synthetic-sensitive-database-detail");
+        return prepare(sql);
+      }) as any;
+    }
+    const response = await worker.fetch(
+      new Request(flow.callback, { headers: { Cookie: flow.binding } }),
+      h.env,
+    );
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      error: "Unable to complete request",
+    });
+    expect(response.headers.get("Cache-Control")).toContain("no-store");
+    expect(console.warn).toHaveBeenCalledWith(
+      "oauth_callback_failure",
+      category,
+    );
+    expect(console.warn).toHaveBeenCalledTimes(
+      category === "token_exchange" ? 2 : 1,
+    );
+    if (category === "token_exchange")
+      expect(console.warn).toHaveBeenCalledWith(
+        "oauth_token_exchange_failure",
+        401,
+        "invalid_client",
+      );
+    expect(h.db.prepare("SELECT COUNT(*) AS n FROM connections").get()!.n).toBe(
+      0,
+    );
+    expect(
+      h.db.prepare("SELECT COUNT(*) AS n FROM oauth_states").get()!.n,
+    ).toBe(0);
+    expect(network).toHaveBeenCalledTimes(
+      category === "token_exchange" ? 1 : 2,
     );
   });
 });

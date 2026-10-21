@@ -15,6 +15,7 @@ import {
   type ProviderName,
   type TokenSet,
   providerRequest,
+  oauthTokenRequest,
   ProviderError,
   type Fetcher,
 } from "./providers";
@@ -270,7 +271,7 @@ export async function finishOAuth(
       row.verifier,
     );
     category = "token_exchange";
-    const tokens = (await providerRequest(
+    const tokens = (await oauthTokenRequest(
       oauthConfig(provider).token,
       {
         method: "POST",
