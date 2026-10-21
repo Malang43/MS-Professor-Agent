@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --env local --local",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "db:migrate": "wrangler d1 migrations apply outreach --local"
+    "db:migrate": "wrangler d1 migrations apply outreach --env local --local"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20251001.0",

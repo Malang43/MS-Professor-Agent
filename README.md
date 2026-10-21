@@ -1,10 +1,12 @@
-# MS Professor Outreach Agent — Phase 1
+# MS Professor Outreach Agent
 
-A multi-user student workspace built with Next.js, TypeScript, Tailwind, Cloudflare Workers, D1 and private R2 storage. Email delivery and AI drafting are **mock only**. There is no SMTP transport, real mailbox connection, or external AI call in this release.
+A multi-user student workspace using Next.js, TypeScript, Cloudflare Workers, D1 and private Workers KV storage. The existing application and same-origin Vercel API proxy are preserved. No card, R2 subscription or custom domain is required for the prepared default deployment. Cloud accounts still need authentication, eligible free plans and deployment approval.
+
+**Default mode sends no real email and makes no AI calls.** Gmail and Microsoft Graph adapters, encrypted OAuth connections, a guarded live-test outbox and optional Groq integration are implemented and covered by mocked transport tests. They are disabled unless separately configured. A connected mailbox alone does not authorize live sending. Real sends additionally require a server-side controlled-recipient allowlist and explicit approval of the particular test.
 
 ## Local setup
 
-Use Node.js **24 LTS** (tests use Node's built-in SQLite) and npm. On Windows, use `npm.cmd` if PowerShell blocks `npm.ps1`.
+Use Node.js **24 LTS** and npm. On Windows use `npm.cmd` when PowerShell blocks `npm.ps1`.
 
 ```sh
 npm ci
@@ -12,31 +14,27 @@ npm run db:migrate
 npm run dev:api
 ```
 
-In a second terminal:
+In another terminal:
 
 ```sh
 npm run dev
 ```
 
-Open http://localhost:3000 and create a student account with a password of at least 12 characters. No seed accounts or credentials are installed. Wrangler emulates D1 and R2 locally, so no Cloudflare account or payment details are needed for local use. Data persists under `apps/api/.wrangler/`; do not commit that directory.
+Open http://localhost:3000 and create an account with a password of at least 12 characters. Use `localhost` consistently. There are no seed credentials. The API dev script uses the **local** Wrangler environment, local D1 and local KV. Its optional local R2 binding keeps legacy documents readable without enabling or contacting remote R2. Production configuration has only D1 and KV.
 
-Environment defaults already work locally. To override the API URL, copy `.env.example` to **apps/web/.env.local** and set `NEXT_PUBLIC_API_URL`. To override the allowed web origin, create **apps/api/.dev.vars** with `APP_ORIGIN=http://localhost:3000`. Use `localhost` consistently in both URLs so the session cookie works. Restart servers after changing configuration.
+Copy `.env.example` to `apps/web/.env.local` only to override the development API URL. Worker development overrides belong in ignored `apps/api/.dev.vars`. Production browser requests/downloads always use relative `/api` URLs. Never put backend secrets in frontend variables. Local data lives in ignored `apps/api/.wrangler/`.
 
-## Try the complete workflow
+## Preserved workflow
 
-1. Save your name, university, degree, GPA, research interests and IANA timezone in Academic profile.
-2. Add professors manually or import CSV / `.xlsx`. Download the template in Professors. Headers: `name,email,university,interests`; the first two are required. Import is atomic, limited to 500 rows / 5 MB, and skips duplicate email addresses within your own account. Legacy `.xls` is not supported.
-3. Upload private PDF, DOCX or TXT documents, up to 10 MB each. Files are served as authenticated downloads, never public URLs.
-4. Compose an email, select a professor and attachments, and choose a workflow:
-   - **A / Manual:** write an email and save a draft. Select multiple manual drafts in Outreach and approve together, or review individually.
-   - **B / AI review:** generate a mock draft, edit it, save it, open Review, and approve that exact email individually. Server validation rejects AI batch approval.
-   - **C / Authorized auto:** generate or edit the draft and explicitly check the authorization for this particular email. Saving places it directly in the approved queue. Edits clear the authorization checkbox.
-5. The schedule is entered as wall-clock time in the selected IANA zone and stored in UTC with the zone alongside it. Nonexistent DST times are rejected; ambiguous repeated hours choose one valid occurrence. Review shows UTC for confirmation. Past times are immediately eligible.
-6. In local development, use **Run mock scheduler** in Outreach to process due approved messages. Deployed Workers also use the minute cron. A mock sent status is a durable simulation record, not evidence of an actual email delivery.
-7. For a sent message, record a reply manually or set a follow-up reminder. Follow-ups shows upcoming/due reminders; the bell opens that view. Reminders do not send follow-up emails or push notifications. Reload or perform an action to refresh status after a cron tick.
-   Use **Simulate failure** on a pending message to exercise failed status without contacting a provider.
-8. Pause prevents new deliveries while preserving pending messages; resume restarts processing. Cancel affects one outstanding message. Stop cancels all your outstanding drafts and scheduled messages. Resume does not resurrect cancelled messages.
-9. Sign out and create a second account to verify the separate workspace. Audit history records each account's activity.
+1. Save the student profile and IANA timezone. Dates are entered in that timezone and stored as UTC; DST gaps are rejected.
+2. Add professors manually or import CSV/XLSX, up to 500 rows / 5 MB. CSV headers are `name,email,university,interests`. Download the existing template. Information is student-supplied; use Confirm source for AI to record an official HTTPS source before Groq can use those facts. This is human confirmation, not independent webpage verification. Legacy XLS is unsupported.
+3. Upload private PDF/DOCX/TXT files. The KV MVP limit is **2 MiB per file**, **10 active files / 20 MiB per student**, with **30-day expiry**. A new upload can take 60 seconds or longer to propagate; retry a temporary 503. Quotas and ownership are enforced in D1. Delete unused documents from the library; files in outstanding messages or armed follow-ups must first be cancelled. Delete hides access immediately; physical cleanup is retried.
+4. Select the **mock mailbox** or, only after setup and controlled-test approval, an authorized connected account. Choose manual + batch approval, AI draft + individual review, or explicitly authorized auto mode. Edits clear consent. Submitted content, recipient, selected account and attachments are frozen for live delivery. Live attachments are limited to three totaling 2 MiB.
+5. Preview/edit a draft before approval. Mock templates work without AI. Optional Groq selects from audited factual templates using only the supplied profile/professor fields; it cannot introduce a publication, funding claim or affiliation. This deliberately does not enable unrestricted AI prose. Rate/key/quota failures fall back to editable templates.
+6. Run the mock scheduler manually or use deployed minute cron. Mock sent status is a simulation. Live test jobs are separately leased, quota-limited and reconciled when uncertain; Graph acceptance is not treated as a confirmed send. Review shows the transport state and provider message ID.
+7. Record replies, declines, opt-outs or bounces. Connected accounts with read permission can poll correlated threads; notifications appear in Settings. Check replies now is user-scoped. Delayed replies stop optional follow-ups. Automated bounce classification only covers delivery-status reports in the correlated thread; record out-of-thread bounces manually. Detection is not a complete mailbox ingestion/DSN parser.
+8. Optionally preauthorize **one exact follow-up**, 7-10 days after a confirmed live-test send, with exact subject/body and the same recipient/account/attachments. A recent successful complete reply check is mandatory. Known replies, declines, opt-outs, disconnection and cancellation stop it. It is off by default. Regular follow-up reminders and manual composition remain available.
+9. Pause/resume/cancel/stop preserve existing behavior. No system can retract a provider request already accepted; uncertainty is retained rather than blindly resent. Retained messages are capped at 100 per student / 1000 globally to protect free storage; capacity errors require operator retention review, never an automatic upgrade. Sign into a second account to verify tenant isolation. Audit history remains student-scoped.
 
 ## Verification
 
@@ -44,46 +42,23 @@ Environment defaults already work locally. To override the API URL, copy `.env.e
 npm run typecheck
 npm test
 npm run build
+npm audit
 ```
 
-Tests execute real application routes and the actual migration/SQL against an in-memory SQLite database. Cloudflare's D1 transport is adapted to SQLite and R2 is represented by an in-memory private bucket. Tests cover identity, password checking, session revocation, tenant isolation, private downloads, attachment ownership, import deduplication, manual/AI approvals, authorization, due times, duplicate prevention, controls, follow-ups, replies and mock drafting. GitHub Actions runs the same checks on Node 24. The Next.js production export is generated in `apps/web/out/`.
+Tests exercise the actual routes and both SQL migrations with SQLite, in-memory KV, mocked provider HTTP and a two-hop local reverse proxy. Coverage includes identity/session revocation, CSRF, no-store responses, private files/deletion, quotas, eventual consistency/failure cleanup, tenant isolation, OAuth replay and encryption, refresh/revocation, send claiming/uncertainty, follow-up suppression and AI budgets. Tests block live provider network access. They are not live Gmail/Outlook or Vercel-edge certification.
 
-Timezone tests additionally cover DST gaps/overlaps and date-specific offsets. For an optional real local Worker smoke check, keep `npm run dev:api` running and execute `node scripts/smoke.mjs`. It tests local D1 and R2 bindings and creates one isolated, randomly named smoke account in your ignored local database.
+For a real local Worker smoke check, keep the local API running and run `node scripts/smoke.mjs`. It creates synthetic test accounts/documents in local storage. `SMOKE_API_URL=http://localhost:8791/api` can select another local port; the script rejects non-local targets. It verifies real local D1/KV bindings, private upload/download/delete, user isolation, mock delivery and logout revocation.
 
-## Private GitHub handoff
+## Deployment and manual setup
 
-Nothing is pushed or deployed by local setup or verification. After explicitly authorizing publication, create an empty **Private** GitHub repository named `MS-Professor-Agent` in your account. Do not initialize it with a README, license or gitignore. Then run:
+Read [DEPLOYMENT.md](DEPLOYMENT.md), including its **single manual setup checklist**, exact Vercel settings, Cloudflare setup order, OAuth registration details, safe secret configuration, no-card restrictions and production validation. No resources or deployments are authorized by documentation commands. Review before committing/pushing; Git hooks may auto-deploy.
 
-```sh
-git remote add origin https://github.com/YOUR_USERNAME/MS-Professor-Agent.git
-git remote -v
-git push -u origin main
-```
+The production API needs a Free Worker, D1 database, private KV namespace and a workers.dev endpoint. The frontend uses Vercel with root `apps/web` and `apps/web/vercel.json`; no purchased domain or Next.js Function is needed. Keep all no-store headers and the rewrite caching opt-out. Cloudflare Free CPU/request/storage limits must be measured after an authorized deployment; no unlimited usage is promised.
 
-Replace `YOUR_USERNAME` with your account. Confirm repository visibility is **Private** before pushing. Use Git credential manager or SSH authentication; never put tokens in remote URLs. GitHub Actions only runs checks and has no deployment steps.
+## Repository hygiene
 
-Before committing, review `git status --short --untracked-files=all`, `git diff --cached --stat` and `git diff --cached`. Only the root `.env.example` is allowed as an environment template; it contains local example URLs and comments only. Put real environment values in ignored `.env*` or `.dev.vars*` files. `NEXT_PUBLIC_` values are public browser configuration and must never contain secrets.
+The repository `Malang43/MS-Professor-Agent` is private. Never make it public, force-push or deploy without approval. `.gitignore` excludes all real `.env*`/`.dev.vars*` files, keys/credentials/token stores, databases, private uploads, Wrangler state, dependencies and generated output. Only the root `.env.example` is an allowed environment template and contains placeholders/comments/local URLs. SQL migrations and synthetic tests are source, not private database contents. Review `git status`, staged filenames and `git diff --cached` before committing; never force-add a secret.
 
-Ignore rules exclude Wrangler state (local D1 databases and private R2 blobs), database backups, credential/token files, private upload directories, PDF/Word/Excel documents, logs, dependencies and build output. Keep private TXT/CSV documents inside ignored `uploads/` or `private-documents/` directories, away from source and public assets. The committed professor CSV is an import template. Ignore rules are filename safeguards: review file contents for secrets and personal data, and never force-add sensitive files. SQL schema migrations remain versioned.
+## Architecture and limits
 
-## Repository
-
-```text
-apps/web/                 Next.js App Router dashboard; static export
-apps/api/src/             Cloudflare Worker REST API and scheduled handler
-apps/api/migrations/      D1 schema migrations
-apps/api/tests/           SQLite-backed API integration tests
-docs/ARCHITECTURE.md      data model, security and Phase 2 design
-.github/workflows/ci.yml  automated verification
-.env.example             environment template
-```
-
-## Cloudflare configuration (optional; not needed locally)
-
-Create a D1 database and private R2 bucket, then replace the placeholder database ID and bucket name in `apps/api/wrangler.jsonc`. Keep R2 public access disabled. Apply migrations with `npx wrangler d1 migrations apply outreach --remote` from `apps/api`. Deploy the API using Wrangler and host the static Next.js export with Cloudflare Pages or another static host. Set `NEXT_PUBLIC_API_URL` **before building** and `APP_ORIGIN` to the exact HTTPS frontend origin. Use same-site custom domains (for example `app.example.com` and `api.example.com`) because cookies use SameSite=Strict; unrelated host domains require a revised auth/proxy design. No deployment has been performed by this repository setup.
-
-Workers, D1 and static hosting are intended to fit small free-tier workloads. R2 availability, account activation requirements and service quotas must be checked with your Cloudflare account before enabling production infrastructure; no paid feature is required by the local application. Treat this as a functional Phase 1 implementation, not a production-readiness certification.
-
-## Phase 2
-
-See [architecture and implementation plan](docs/ARCHITECTURE.md). Next work: production authentication hardening, Gmail / Microsoft OAuth, encrypted token storage, reliable real-provider outbox with reconciliation, Groq/provider adapters, mailbox reply synchronization, document malware scanning, operational alerts, and browser/end-to-end tests. No live provider credentials should be configured for Phase 1.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module boundaries, transaction/consistency design, provider limitations and existing production-hardening gaps. Password recovery, email verification/MFA, full malware scanning, universal bounce/opt-out classification and live provider certification remain outside this readiness claim. Google verification and eligible Microsoft registration may block public integrations; do not bypass them or sign up for a card-based trial.

@@ -1,6 +1,14 @@
+import { assertBindings } from "./sql";
 import { beforeEach, describe, expect, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { FILE_LIMIT } from "../src/storage";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+  type Server,
+} from "node:http";
 import worker, { runJobs, type Env, validTimezone } from "../src/index";
 
 // Execute the actual migration and SQL against SQLite; only Cloudflare's transport
@@ -9,9 +17,16 @@ let db: DatabaseSync, env: Env;
 function statement(sql: string, params: unknown[] = []): any {
   return {
     bind: (...p: unknown[]) => statement(sql, p),
-    first: async () => db.prepare(sql).get(...(params as any[])) || null,
-    all: async () => ({ results: db.prepare(sql).all(...(params as any[])) }),
+    first: async () => {
+      assertBindings(sql, params);
+      return db.prepare(sql).get(...(params as any[])) || null;
+    },
+    all: async () => {
+      assertBindings(sql, params);
+      return { results: db.prepare(sql).all(...(params as any[])) };
+    },
     run: async () => {
+      assertBindings(sql, params);
       const r = db.prepare(sql).run(...(params as any[]));
       return { meta: { changes: Number(r.changes) } };
     },
@@ -21,12 +36,12 @@ function statement(sql: string, params: unknown[] = []): any {
 }
 beforeEach(() => {
   db = new DatabaseSync(":memory:");
-  db.exec(
-    readFileSync(
-      new URL("../migrations/0001_initial.sql", import.meta.url),
-      "utf8",
-    ),
-  );
+  for (const file of readdirSync(new URL("../migrations/", import.meta.url))
+    .filter((f) => f.endsWith(".sql"))
+    .sort())
+    db.exec(
+      readFileSync(new URL("../migrations/" + file, import.meta.url), "utf8"),
+    );
   const objects = new Map<string, { body: ArrayBuffer }>();
   env = {
     APP_ORIGIN: "http://localhost:3000",
@@ -36,6 +51,7 @@ beforeEach(() => {
         db.exec("BEGIN");
         try {
           const results = stmts.map((s) => {
+            assertBindings(s._sql, s._params);
             const r = db.prepare(s._sql).run(...s._params);
             return { meta: { changes: Number(r.changes) } };
           });
@@ -47,11 +63,11 @@ beforeEach(() => {
         }
       },
     } as any,
-    DOCUMENTS: {
-      put: async (key: string, stream: ReadableStream) => {
-        objects.set(key, { body: await new Response(stream).arrayBuffer() });
+    DOCUMENTS_KV: {
+      put: async (key: string, bytes: ArrayBuffer) => {
+        objects.set(key, { body: bytes });
       },
-      get: async (key: string) => objects.get(key) || null,
+      get: async (key: string) => objects.get(key)?.body || null,
       delete: async (key: string) => {
         objects.delete(key);
       },
@@ -365,5 +381,382 @@ describe("approval, scheduling, and controls", () => {
     expect(draft.body).toContain("Alex Morgan");
     expect(validTimezone("Asia/Karachi")).toBe(true);
     expect(validTimezone("invalid/zone")).toBe(false);
+  });
+});
+
+// Real local HTTP hops exercise request bodies and Cookie/Set-Cookie transport.
+// This models the checked-in rewrite; it does not emulate Vercel's CDN/browser.
+const proxyConfig = JSON.parse(
+  readFileSync(new URL("../../web/vercel.json", import.meta.url), "utf8"),
+);
+const frontendOrigin = "https://ms-professor-agent.vercel.app";
+function expectPrivate(response: Response) {
+  expect(response.headers.get("Cache-Control")).toBe(
+    "private, no-store, max-age=0",
+  );
+  expect(response.headers.get("CDN-Cache-Control")).toBe("no-store");
+  expect(response.headers.get("Vercel-CDN-Cache-Control")).toBe("no-store");
+}
+async function requestBody(request: IncomingMessage) {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  const bytes = Buffer.concat(chunks);
+  return bytes.length ? bytes : undefined;
+}
+function requestHeaders(request: IncomingMessage) {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(request.headers)) {
+    if (value && !["host", "connection", "transfer-encoding"].includes(key))
+      headers.set(key, Array.isArray(value) ? value.join(", ") : value);
+  }
+  return headers;
+}
+async function sendResponse(response: Response, outgoing: ServerResponse) {
+  outgoing.statusCode = response.status;
+  response.headers.forEach((value, key) => {
+    if (key !== "set-cookie") outgoing.setHeader(key, value);
+  });
+  const cookies = response.headers.getSetCookie();
+  if (cookies.length) outgoing.setHeader("Set-Cookie", cookies);
+  outgoing.end(Buffer.from(await response.arrayBuffer()));
+}
+async function listen(server: Server) {
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("No local port");
+  return `http://127.0.0.1:${address.port}`;
+}
+async function close(server: Server) {
+  server.closeAllConnections();
+  await new Promise<void>((resolve, reject) =>
+    server.close((error) => (error ? reject(error) : resolve())),
+  );
+}
+async function withProxy(run: (base: string) => Promise<void>) {
+  env.APP_ORIGIN = frontendOrigin;
+  const upstream = createServer(async (incoming, outgoing) => {
+    try {
+      const response = await worker.fetch(
+        new Request(
+          new URL(incoming.url!, proxyConfig.rewrites[0].destination),
+          {
+            method: incoming.method,
+            headers: requestHeaders(incoming),
+            body: await requestBody(incoming),
+          },
+        ),
+        env,
+      );
+      await sendResponse(response, outgoing);
+    } catch {
+      outgoing.statusCode = 500;
+      outgoing.end("Test upstream failed");
+    }
+  });
+  const upstreamBase = await listen(upstream);
+  const proxy = createServer(async (incoming, outgoing) => {
+    try {
+      const url = new URL(incoming.url!, "http://proxy.test");
+      if (!url.pathname.startsWith("/api/")) {
+        outgoing.statusCode = 404;
+        outgoing.end();
+        return;
+      }
+      const destination = new URL(
+        proxyConfig.rewrites[0].destination.replace(
+          ":path*",
+          url.pathname.slice(5),
+        ),
+      );
+      const response = await fetch(
+        upstreamBase + destination.pathname + url.search,
+        {
+          method: incoming.method,
+          headers: requestHeaders(incoming),
+          body: await requestBody(incoming),
+          redirect: "manual",
+        },
+      );
+      const forwarded = new Response(response.body, {
+        status: response.status,
+        headers: response.headers,
+      });
+      for (const header of proxyConfig.headers[0].headers)
+        forwarded.headers.set(header.key, header.value);
+      await sendResponse(forwarded, outgoing);
+    } catch {
+      outgoing.statusCode = 502;
+      outgoing.end("Test proxy failed");
+    }
+  });
+  try {
+    await run(await listen(proxy));
+  } finally {
+    await close(proxy);
+    await close(upstream);
+  }
+}
+
+describe("same-origin API reverse proxy", () => {
+  it("preserves HTTPS login/logout, private bounded uploads, downloads and account isolation over HTTP hops", async () => {
+    await withProxy(async (base) => {
+      const api = (
+        path: string,
+        method = "GET",
+        body?: unknown,
+        cookie = "",
+        origin: string | null = frontendOrigin,
+      ) => {
+        const headers = new Headers(cookie ? { Cookie: cookie } : {});
+        if (origin !== null) headers.set("Origin", origin);
+        if (body && !(body instanceof FormData))
+          headers.set("Content-Type", "application/json");
+        return fetch(base + "/api" + path, {
+          method,
+          headers,
+          body:
+            body instanceof FormData
+              ? body
+              : body
+                ? JSON.stringify(body)
+                : undefined,
+          redirect: "manual",
+        });
+      };
+      const signupResponse = await api("/auth/signup", "POST", {
+        email: "proxy-a@example.com",
+        password: "proxy-test-password-123",
+      });
+      expect(signupResponse.status).toBe(200);
+      expectPrivate(signupResponse);
+      const cookieHeader = signupResponse.headers.get("Set-Cookie")!;
+      expect(cookieHeader).toContain(
+        "HttpOnly; SameSite=Strict; Path=/; Max-Age=604800; Secure",
+      );
+      expect(cookieHeader).not.toMatch(/Domain=/i);
+      const cookieA = cookieHeader.split(";")[0];
+      const signupB = await api("/auth/signup", "POST", {
+        email: "proxy-b@example.com",
+        password: "proxy-test-password-123",
+      });
+      expect(signupB.status).toBe(200);
+      const cookieB = signupB.headers.get("Set-Cookie")!.split(";")[0];
+      // Same URL, alternating sessions: user-specific state must never be reused.
+      for (const [cookie, email] of [
+        [cookieA, "proxy-a@example.com"],
+        [cookieB, "proxy-b@example.com"],
+        [cookieA, "proxy-a@example.com"],
+      ]) {
+        const response = await api("/state", "GET", undefined, cookie);
+        expectPrivate(response);
+        expect((await response.json()).account.email).toBe(email);
+      }
+      // A malicious or origin-less logout must not revoke a valid session.
+      for (const origin of ["https://evil.example", null]) {
+        const csrf = await api(
+          "/auth/logout",
+          "POST",
+          undefined,
+          cookieA,
+          origin,
+        );
+        expect(csrf.status).toBe(403);
+        expectPrivate(csrf);
+      }
+      expect(
+        (await api("/auth/logout", "GET", undefined, cookieA, null)).status,
+      ).toBe(405);
+      expect((await api("/state", "GET", undefined, cookieA)).status).toBe(200);
+      const configuredHeaders = Object.fromEntries(
+        proxyConfig.headers[0].headers.map(
+          (header: { key: string; value: string }) => [
+            header.key,
+            header.value,
+          ],
+        ),
+      );
+      expect(configuredHeaders["x-vercel-enable-rewrite-caching"]).toBe("0");
+      const bytes = new Uint8Array(FILE_LIMIT).fill(65);
+      const upload = new FormData();
+      upload.set(
+        "file",
+        new File([bytes], "synthetic-private.txt", { type: "text/plain" }),
+      );
+      const uploaded = await api("/documents", "POST", upload, cookieA);
+      expect(uploaded.status).toBe(200);
+      expectPrivate(uploaded);
+      const { id: documentId } = await uploaded.json();
+      // An ordinary same-origin download link may omit Origin entirely.
+      const downloaded = await api(
+        `/documents/${documentId}?download=1`,
+        "GET",
+        undefined,
+        cookieA,
+        null,
+      );
+      expect(downloaded.status).toBe(200);
+      expectPrivate(downloaded);
+      expect(downloaded.headers.get("Content-Disposition")).toContain(
+        "attachment;",
+      );
+      expect(downloaded.headers.get("Content-Type")).toBe("text/plain");
+      expect(
+        Buffer.compare(
+          Buffer.from(await downloaded.arrayBuffer()),
+          Buffer.from(bytes),
+        ),
+      ).toBe(0);
+      for (const [cookie, status] of [
+        [cookieB, 404],
+        ["", 401],
+      ] as const) {
+        const denied = await api(
+          `/documents/${documentId}`,
+          "GET",
+          undefined,
+          cookie,
+          null,
+        );
+        expect(denied.status).toBe(status);
+        expectPrivate(denied);
+      }
+      const otherState = await api("/state", "GET", undefined, cookieB);
+      expect((await otherState.json()).documents).toEqual([]);
+      expect(
+        (
+          await api(
+            `/documents/${documentId}/delete`,
+            "POST",
+            undefined,
+            cookieA,
+          )
+        ).status,
+      ).toBe(200);
+      expect(
+        (await api(`/documents/${documentId}`, "GET", undefined, cookieA, null))
+          .status,
+      ).toBe(404);
+      const logout = await api("/auth/logout", "POST", undefined, cookieA);
+      expect(logout.status).toBe(200);
+      expectPrivate(logout);
+      expect(logout.headers.get("Set-Cookie")).toBe(
+        "session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure",
+      );
+      expect((await api("/state", "GET", undefined, cookieA)).status).toBe(401);
+      expect(
+        (await api(`/documents/${documentId}`, "GET", undefined, cookieA))
+          .status,
+      ).toBe(401);
+      const wrongPassword = await api("/auth/login", "POST", {
+        email: "proxy-a@example.com",
+        password: "wrong-password-123456",
+      });
+      expect(wrongPassword.status).toBe(401);
+      expectPrivate(wrongPassword);
+      const login = await api("/auth/login", "POST", {
+        email: "proxy-a@example.com",
+        password: "proxy-test-password-123",
+      });
+      expect(login.status).toBe(200);
+      const freshCookie = login.headers.get("Set-Cookie")!.split(";")[0];
+      expect(freshCookie).not.toBe(cookieA);
+      expect((await api("/state", "GET", undefined, freshCookie)).status).toBe(
+        200,
+      );
+    });
+  }, 20000);
+
+  it("rejects cross-site, absent and null origins and never trusts forwarded origins", async () => {
+    await withProxy(async (base) => {
+      for (const origin of [
+        "https://evil.example",
+        "https://preview.vercel.app",
+        "null",
+        null,
+      ]) {
+        const headers = new Headers({
+          "Content-Type": "application/json",
+          "X-Forwarded-Host": new URL(frontendOrigin).host,
+          "X-Forwarded-Proto": "https",
+          "X-Forwarded-Origin": frontendOrigin,
+        });
+        if (origin !== null) headers.set("Origin", origin);
+        const response = await fetch(base + "/api/auth/signup", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            email: "csrf@example.com",
+            password: "csrf-test-password-123",
+          }),
+        });
+        expect(response.status).toBe(403);
+        expectPrivate(response);
+      }
+      expect(db.prepare("SELECT count(*) n FROM users").get()!.n).toBe(0);
+      const preflight = await fetch(base + "/api/auth/login", {
+        method: "OPTIONS",
+        headers: {
+          Origin: frontendOrigin,
+          "Access-Control-Request-Method": "POST",
+        },
+      });
+      expect(preflight.status).toBe(204);
+      expect(preflight.headers.get("Access-Control-Allow-Origin")).toBe(
+        frontendOrigin,
+      );
+      expect(preflight.headers.get("Access-Control-Allow-Credentials")).toBe(
+        "true",
+      );
+      expectPrivate(preflight);
+    });
+  });
+
+  it("keeps Worker successes, errors and preflights private before proxy headers are applied", async () => {
+    env.APP_ORIGIN = frontendOrigin;
+    for (const [path, method, headers, status] of [
+      ["/health", "GET", {}, 200],
+      ["/state", "GET", {}, 401],
+      ["/auth/login", "OPTIONS", { Origin: frontendOrigin }, 204],
+      ["/state", "GET", { Origin: "https://evil.example" }, 403],
+      ["/auth/login", "POST", {}, 403],
+      ["/auth/login", "POST", { Origin: frontendOrigin }, 400],
+      [
+        "/auth/login",
+        "POST",
+        { Origin: frontendOrigin, "Content-Length": String(12 * 1024 * 1024) },
+        413,
+      ],
+    ] as const) {
+      const response = await worker.fetch(
+        new Request("https://api.test/api" + path, {
+          method,
+          headers,
+          body: method === "POST" ? "{}" : undefined,
+        }),
+        env,
+      );
+      expect(response.status).toBe(status);
+      expectPrivate(response);
+      expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    }
+    const originalDb = env.DB;
+    env.DB = {
+      prepare() {
+        throw new Error("synthetic DB failure");
+      },
+    } as any;
+    try {
+      const response = await worker.fetch(
+        new Request("https://api.test/api/state", {
+          headers: { Cookie: "session=synthetic" },
+        }),
+        env,
+      );
+      expect(response.status).toBe(500);
+      expectPrivate(response);
+      expect(await response.text()).not.toContain("synthetic DB failure");
+    } finally {
+      env.DB = originalDb;
+    }
   });
 });

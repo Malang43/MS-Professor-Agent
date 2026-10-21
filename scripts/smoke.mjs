@@ -3,7 +3,18 @@ import { randomUUID } from "node:crypto";
 
 // Optional runtime check against an already running local Wrangler API.
 // Creates one isolated smoke account in local storage; never targets production.
-const base = "http://localhost:8787/api";
+const base = process.env.SMOKE_API_URL || "http://localhost:8787/api";
+const smokeUrl = new URL(base);
+if (
+  smokeUrl.protocol !== "http:" ||
+  !["localhost", "127.0.0.1"].includes(smokeUrl.hostname) ||
+  smokeUrl.pathname !== "/api" ||
+  smokeUrl.username ||
+  smokeUrl.password ||
+  smokeUrl.search ||
+  smokeUrl.hash
+)
+  throw new Error("Smoke checks must target a local /api endpoint only.");
 let cookie = "";
 async function api(path, method = "GET", body) {
   const response = await fetch(base + path, {
@@ -24,7 +35,13 @@ async function api(path, method = "GET", body) {
   assert.equal(response.status, 200, JSON.stringify(data));
   return data;
 }
-assert.equal((await api("/health")).provider, "mock");
+const health = await api("/health");
+assert.equal(health.provider, "mock");
+assert.equal(
+  health.live_email,
+  false,
+  "Smoke checks require real sending disabled",
+);
 await api("/auth/signup", "POST", {
   email: `smoke-${randomUUID()}@example.com`,
   password: randomUUID(),
@@ -58,7 +75,30 @@ await api("/jobs/run", "POST");
 const state = await api("/state");
 assert.equal(state.messages[0].status, "sent");
 assert.equal(state.audit.filter((a) => a.action === "mock.sent").length, 1);
+const ownerCookie = cookie;
+await api("/auth/signup", "POST", {
+  email: `smoke-other-${randomUUID()}@example.com`,
+  password: randomUUID(),
+});
+assert.equal((await api("/state")).documents.length, 0);
+assert.equal(
+  (await fetch(base + "/documents/" + doc.id, { headers: { Cookie: cookie } }))
+    .status,
+  404,
+);
 await api("/auth/logout", "POST");
+cookie = ownerCookie;
+await api("/documents/" + doc.id + "/delete", "POST");
+assert.equal(
+  (await fetch(base + "/documents/" + doc.id, { headers: { Cookie: cookie } }))
+    .status,
+  404,
+);
+await api("/auth/logout", "POST");
+assert.equal(
+  (await fetch(base + "/state", { headers: { Cookie: ownerCookie } })).status,
+  401,
+);
 console.log(
-  "Runtime smoke passed: authentication, D1 persistence, private R2 upload/download, attachment ownership, mock dispatch and duplicate prevention.",
+  "Runtime smoke passed: authentication, D1 persistence, private KV upload/download/deletion, user isolation, session revocation, mock dispatch and duplicate prevention.",
 );

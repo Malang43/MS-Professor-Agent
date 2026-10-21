@@ -31,7 +31,15 @@ import Papa from "papaparse";
 import readXlsxFile from "read-excel-file";
 import { localDate, zonedISO } from "../lib/timezone";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8787";
+// Production always uses the same-origin Vercel /api rewrite, including downloads.
+// A development override can still target a local Worker directly.
+const API =
+  process.env.NODE_ENV === "production"
+    ? ""
+    : (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8787").replace(
+        /\/$/,
+        "",
+      );
 type Profile = {
   name: string;
   university: string;
@@ -43,13 +51,15 @@ type Profile = {
   stopped: number;
 };
 type Professor = {
+  source_url?: string | null;
+  verified_at?: number | null;
   id: string;
   name: string;
   email: string;
   university: string;
   interests: string;
 };
-type Doc = { id: string; name: string; size: number };
+type Doc = { id: string; name: string; size: number; expires_at?: number };
 type Message = {
   id: string;
   professor_id: string;
@@ -71,6 +81,35 @@ type State = {
   professors: Professor[];
   documents: Doc[];
   messages: Message[];
+  connections: {
+    id: string;
+    provider: "gmail" | "outlook";
+    address: string;
+    status: string;
+    scopes: string;
+  }[];
+  capabilities: {
+    gmail: boolean;
+    outlook: boolean;
+    live_email: boolean;
+    ai: string;
+  };
+  notifications: { id: string; kind: string; message: string; read: number }[];
+  automation: {
+    message_id: string;
+    days: number;
+    subject: string;
+    body: string;
+    generated: number;
+  }[];
+  transports: {
+    message_id: string;
+    connection_id: string;
+    state: string;
+    provider_id: string | null;
+    thread_id: string | null;
+  }[];
+  ai_usage: { requests: number; tokens: number };
   audit: Audit[];
   account: { email: string };
 };
@@ -128,7 +167,9 @@ export default function Home() {
     [busy, setBusy] = useState(false),
     [mobile, setMobile] = useState(false),
     [query, setQuery] = useState(""),
-    [modal, setModal] = useState<"professor" | "compose" | null>(null),
+    [modal, setModal] = useState<"professor" | "compose" | "verify" | null>(
+      null,
+    ),
     [review, setReview] = useState<Message | null>(null),
     [selected, setSelected] = useState<string[]>([]);
   const [profile, setProfile] = useState<Profile>(initialProfile);
@@ -139,15 +180,24 @@ export default function Home() {
     interests: "",
   });
   const [draft, setDraft] = useState({
+    sending_account_id: "",
+    followup_enabled: false,
+    followup_days: 7,
+    followup_subject: "",
+    followup_body: "",
     professor_id: "",
     subject: "",
     body: "",
     mode: "manual",
     authorized: false,
+    followup_authorized: false,
     scheduled_at: localDate("Asia/Karachi"),
     timezone: "Asia/Karachi",
     attachments: [] as string[],
   });
+  const [draftWarning, setDraftWarning] = useState("");
+  const [verificationTarget, setVerificationTarget] =
+    useState<Professor | null>(null);
   async function refresh() {
     try {
       const data = await request("/state");
@@ -178,11 +228,17 @@ export default function Home() {
   }
   function compose(professorId = "") {
     setDraft({
+      sending_account_id: "",
+      followup_enabled: false,
+      followup_days: 7,
+      followup_subject: "",
+      followup_body: "",
       professor_id: professorId || state?.professors[0]?.id || "",
       subject: "",
       body: "",
       mode: "manual",
       authorized: false,
+      followup_authorized: false,
       scheduled_at: localDate(state?.profile.timezone || "Asia/Karachi"),
       timezone: state?.profile.timezone || "Asia/Karachi",
       attachments: [],
@@ -359,7 +415,8 @@ export default function Home() {
             </button>
           </form>
           <div className="security-note">
-            <ShieldCheck size={16} /> Private workspace · Mock sending only
+            <ShieldCheck size={16} /> Private workspace - Mock delivery by
+            default
           </div>
         </div>
         <footer>
@@ -539,7 +596,14 @@ export default function Home() {
               <br />
               Explore possibilities.
             </p>
-            <small>All emails & AI are simulated.</small>
+            <small>
+              {state.capabilities.live_email
+                ? "Controlled live tests enabled."
+                : "Email sending is simulated."}{" "}
+              {state.capabilities.ai === "groq"
+                ? "Groq template selection active."
+                : "AI templates are simulated."}
+            </small>
           </div>
           <button className="user" onClick={() => setView("Academic profile")}>
             <span className="avatar">
@@ -580,7 +644,9 @@ export default function Home() {
           <div className="top-actions">
             <span className="sandbox">
               <span className="dot" />
-              Mock environment
+              {state.capabilities.live_email
+                ? "Controlled live tests"
+                : "Mock environment"}
             </span>
             <button
               aria-label="Follow-up notifications"
@@ -639,7 +705,7 @@ export default function Home() {
               <Pause size={18} />
               {profile.stopped
                 ? "Outreach stopped. All outstanding drafts and scheduled messages were cancelled."
-                : "Outreach is paused. Scheduled mock messages will wait."}
+                : "Outreach is paused. Scheduled messages will wait."}
               <button
                 onClick={() =>
                   act(async () => {
@@ -864,6 +930,18 @@ export default function Home() {
                       >
                         Prepare outreach <ArrowUpRight size={16} />
                       </button>
+                      <button
+                        className="secondary"
+                        disabled={busy}
+                        onClick={() => {
+                          setVerificationTarget(p);
+                          setModal("verify");
+                        }}
+                      >
+                        {p.verified_at
+                          ? "Review source confirmation"
+                          : "Confirm source for AI"}
+                      </button>
                     </article>
                   ))}
               </div>
@@ -953,13 +1031,18 @@ export default function Home() {
                         act(async () => {
                           const form = new FormData();
                           form.set("file", file);
+                          if (file.size > 2 * 1024 * 1024)
+                            throw new Error("Document limit is 2 MiB.");
                           await request("/documents", "POST", form);
-                        }, "Private document uploaded");
+                        }, "Private document uploaded. New files may take a minute to become downloadable.");
                       e.target.value = "";
                     }}
                   />
                 </label>
-                <small>PDF, DOCX, TXT · Maximum 10 MB per file</small>
+                <small>
+                  PDF, DOCX, TXT · Maximum 2 MiB per file; 10 files / 20 MiB per
+                  student; files expire after 30 days
+                </small>
               </div>
               <div className="document-list">
                 {state.documents.map((d) => (
@@ -977,6 +1060,22 @@ export default function Home() {
                     >
                       Download <ArrowUpRight size={15} />
                     </a>
+                    <button
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            "Delete this private document? Outstanding attachments must be cancelled first.",
+                          )
+                        )
+                          act(async () => {
+                            await request(`/documents/${d.id}/delete`, "POST");
+                          }, "Document hidden; private storage cleanup is queued.");
+                      }}
+                    >
+                      Delete
+                    </button>
                   </div>
                 ))}
               </div>
@@ -996,7 +1095,7 @@ export default function Home() {
                 <GraduationCap size={22} />
                 <div>
                   <h2>The researcher behind the introduction</h2>
-                  <p>Used to personalize your mock AI drafts.</p>
+                  <p>Used to personalize your editable drafts.</p>
                 </div>
               </div>
               <div className="form-grid">
@@ -1115,34 +1214,140 @@ export default function Home() {
               <section className="panel settings-card">
                 <h2>Email connections</h2>
                 <p>
-                  Phase 1 uses a mock mailbox. No OAuth credentials are
-                  requested or stored.
+                  Mock delivery remains available without a mailbox. Connecting
+                  grants the displayed provider scopes; live sending is
+                  separately disabled unless configured for controlled test
+                  recipients.
                 </p>
-                {["Gmail · Gmail API", "Microsoft Outlook · Graph API"].map(
-                  (provider) => (
-                    <div className="provider" key={provider}>
-                      <Mail size={21} />
-                      <strong>{provider}</strong>
-                      <span className="badge draft">Phase 2</span>
-                    </div>
-                  ),
-                )}
-                <div className="tip">
-                  <ShieldCheck size={19} />
-                  <p>
-                    Real account connections will use restricted OAuth scopes
-                    and encrypted tokens.
-                  </p>
-                </div>
-                <h3>AI provider</h3>
-                <div className="provider">
-                  <Sparkles size={20} />
-                  <strong>Mock draft generator</strong>
-                  <span className="badge sent">Active</span>
-                </div>
+                {(["gmail", "outlook"] as const).map((provider) => (
+                  <div className="provider" key={provider}>
+                    <Mail size={21} />
+                    <strong>
+                      {provider === "gmail" ? "Gmail" : "Microsoft Outlook"}
+                    </strong>
+                    <button
+                      className="secondary"
+                      disabled={busy || !state.capabilities[provider]}
+                      onClick={() =>
+                        act(async () => {
+                          const result = await request(
+                            `/connections/${provider}/start`,
+                            "POST",
+                            { read_replies: true },
+                          );
+                          window.location.assign(result.url);
+                        }, "Opening provider consent")
+                      }
+                    >
+                      Connect with reply access
+                    </button>
+                    {!state.capabilities[provider] && (
+                      <small>Administrator setup required</small>
+                    )}
+                  </div>
+                ))}
                 <p className="helper">
-                  Groq and alternative providers are planned for Phase 2.
+                  Reply access permits reading mailbox threads to stop
+                  follow-ups. You review the provider consent screen. Microsoft
+                  users can also remove this app's consent in their Microsoft
+                  account.
                 </p>
+                {state.connections.map((account) => (
+                  <div className="provider" key={account.id}>
+                    <strong>{account.address}</strong>
+                    <span>{account.status}</span>
+                    <button
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() =>
+                        act(async () => {
+                          await request(
+                            `/connections/${account.id}/disconnect`,
+                            "POST",
+                          );
+                        }, "Account disconnected; outstanding messages cancelled")
+                      }
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+                ))}
+                <h3>AI provider</h3>
+                <p>
+                  {state.capabilities.ai === "groq"
+                    ? "Groq configured with safe template fallback"
+                    : "Editable mock templates"}{" "}
+                  ? {state.ai_usage.requests} AI requests /{" "}
+                  {state.ai_usage.tokens} tokens used
+                </p>
+                <p className="helper">
+                  AI selects from factual templates; it does not invent
+                  research, publications, affiliations or funding. Only
+                  student-entered profile and professor fields are used. Always
+                  preview and edit before approval.
+                </p>
+                <button
+                  className="secondary"
+                  disabled={
+                    busy ||
+                    !state.connections.some(
+                      (account) =>
+                        account.status === "connected" &&
+                        state.capabilities[account.provider] &&
+                        /gmail.readonly|Mail.Read/.test(account.scopes),
+                    )
+                  }
+                  onClick={() =>
+                    act(async () => {
+                      await request("/connections/sync", "POST");
+                    }, "Bounded reply check completed")
+                  }
+                >
+                  Check replies now
+                </button>
+                <h3>Notifications</h3>
+                {state.notifications.map((item) => (
+                  <p key={item.id}>
+                    <strong>{item.kind}: </strong>
+                    {item.message}
+                  </p>
+                ))}
+                {!state.notifications.length && (
+                  <p>No account or delivery notifications.</p>
+                )}
+                <button
+                  className="secondary"
+                  disabled={busy}
+                  onClick={() =>
+                    act(async () => {
+                      await request("/notifications/read", "POST");
+                    }, "Notifications marked read")
+                  }
+                >
+                  Mark read
+                </button>
+                <h3>Recipient opt-out</h3>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const form = e.currentTarget;
+                    const address = String(new FormData(form).get("address"));
+                    act(async () => {
+                      await request("/suppressions", "POST", { address });
+                      form.reset();
+                    }, "Recipient blocked from live sending and follow-ups");
+                  }}
+                >
+                  <input
+                    type="email"
+                    name="address"
+                    required
+                    placeholder="Recipient who declined or opted out"
+                  />
+                  <button className="secondary" disabled={busy}>
+                    Block recipient
+                  </button>
+                </form>
               </section>
               <section className="panel settings-card">
                 <h2>Outreach controls</h2>
@@ -1287,6 +1492,49 @@ export default function Home() {
                 {error}
               </div>
             )}
+            {modal === "verify" && verificationTarget && (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const source_url = String(
+                    new FormData(e.currentTarget).get("source_url"),
+                  );
+                  act(async () => {
+                    await request(
+                      `/professors/${verificationTarget.id}/verify`,
+                      "POST",
+                      { source_url, confirmed: true },
+                    );
+                    setModal(null);
+                  }, "Official source confirmation recorded");
+                }}
+              >
+                <h3>Confirm the professor information</h3>
+                <p>
+                  {verificationTarget.name} | {verificationTarget.email} ?{" "}
+                  {verificationTarget.university} ?{" "}
+                  {verificationTarget.interests}
+                </p>
+                <label>
+                  Official HTTPS profile/source URL
+                  <input
+                    type="url"
+                    name="source_url"
+                    required
+                    defaultValue={verificationTarget.source_url || ""}
+                    placeholder="https://example.edu/faculty/profile"
+                  />
+                </label>
+                <label className="checkbox-label">
+                  <input type="checkbox" required />I checked these facts
+                  against this source. The app does not independently verify the
+                  webpage.
+                </label>
+                <button className="primary" disabled={busy}>
+                  Confirm source
+                </button>
+              </form>
+            )}
             {modal === "professor" && (
               <form
                 onSubmit={(e: FormEvent) => {
@@ -1333,6 +1581,15 @@ export default function Home() {
                     async () => {
                       await request("/messages", "POST", {
                         ...draft,
+                        sending_account_id: draft.sending_account_id || null,
+                        followup: draft.followup_enabled
+                          ? {
+                              days: draft.followup_days,
+                              subject: draft.followup_subject,
+                              body: draft.followup_body,
+                              authorized: draft.followup_authorized,
+                            }
+                          : undefined,
                         scheduled_at: zonedISO(
                           draft.scheduled_at,
                           draft.timezone,
@@ -1341,11 +1598,39 @@ export default function Home() {
                       setModal(null);
                     },
                     draft.mode === "auto"
-                      ? "Authorized mock email scheduled"
+                      ? "Email scheduled with explicit authorization"
                       : "Draft saved for approval",
                   );
                 }}
               >
+                <label>
+                  Sending account
+                  <select
+                    value={draft.sending_account_id}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        sending_account_id: e.target.value,
+                        authorized: false,
+                        followup_enabled: false,
+                        followup_authorized: false,
+                      })
+                    }
+                  >
+                    <option value="">Mock mailbox (no real email)</option>
+                    {state.connections
+                      .filter((a) => a.status === "connected")
+                      .map((a) => (
+                        <option
+                          key={a.id}
+                          value={a.id}
+                          disabled={!state.capabilities.live_email}
+                        >
+                          {a.address} - live controlled test
+                        </option>
+                      ))}
+                  </select>
+                </label>
                 <label>
                   Professor
                   <select
@@ -1356,6 +1641,7 @@ export default function Home() {
                         ...draft,
                         professor_id: e.target.value,
                         authorized: false,
+                        followup_authorized: false,
                       })
                     }
                   >
@@ -1381,6 +1667,7 @@ export default function Home() {
                         ...draft,
                         mode: e.target.value,
                         authorized: false,
+                        followup_authorized: false,
                       })
                     }
                   >
@@ -1405,16 +1692,18 @@ export default function Home() {
                         const result = await request("/draft", "POST", {
                           professor_id: draft.professor_id,
                         });
+                        setDraftWarning(result.warning || "");
                         setDraft({
                           ...draft,
                           subject: result.subject,
                           body: result.body,
                           authorized: false,
+                          followup_authorized: false,
                         });
-                      }, "Mock AI draft generated — personalize before scheduling")
+                      }, "Draft ready - preview and personalize before approval")
                     }
                   >
-                    <Sparkles size={16} /> Generate mock AI draft
+                    <Sparkles size={16} /> Generate draft
                   </button>
                 )}
                 <label>
@@ -1428,6 +1717,7 @@ export default function Home() {
                         ...draft,
                         subject: e.target.value,
                         authorized: false,
+                        followup_authorized: false,
                       })
                     }
                   />
@@ -1444,10 +1734,103 @@ export default function Home() {
                         ...draft,
                         body: e.target.value,
                         authorized: false,
+                        followup_authorized: false,
                       })
                     }
                   />
                 </label>
+                {draftWarning && <p className="helper">{draftWarning}</p>}
+                {draft.sending_account_id && (
+                  <fieldset>
+                    <legend>Optional first follow-up (one maximum)</legend>
+                    <label className="checkbox-label">
+                      <input
+                        type="checkbox"
+                        checked={draft.followup_enabled}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            followup_enabled: e.target.checked,
+                            followup_authorized: false,
+                            authorized: false,
+                          })
+                        }
+                      />
+                      Prepare an exact follow-up for automatic sending if no
+                      reply is detected
+                    </label>
+                    {draft.followup_enabled && (
+                      <>
+                        <label>
+                          Delay (days)
+                          <input
+                            type="number"
+                            min={7}
+                            max={10}
+                            value={draft.followup_days}
+                            onChange={(e) =>
+                              setDraft({
+                                ...draft,
+                                followup_days: Number(e.target.value),
+                                followup_authorized: false,
+                                authorized: false,
+                              })
+                            }
+                          />
+                        </label>
+                        <label>
+                          Exact follow-up subject
+                          <input
+                            required
+                            maxLength={500}
+                            value={draft.followup_subject}
+                            onChange={(e) =>
+                              setDraft({
+                                ...draft,
+                                followup_subject: e.target.value,
+                                followup_authorized: false,
+                                authorized: false,
+                              })
+                            }
+                          />
+                        </label>
+                        <label>
+                          Exact follow-up body
+                          <textarea
+                            required
+                            maxLength={20000}
+                            value={draft.followup_body}
+                            onChange={(e) =>
+                              setDraft({
+                                ...draft,
+                                followup_body: e.target.value,
+                                followup_authorized: false,
+                                authorized: false,
+                              })
+                            }
+                          />
+                        </label>
+                        <label className="checkbox-label">
+                          <input
+                            type="checkbox"
+                            required
+                            checked={draft.followup_authorized}
+                            onChange={(e) =>
+                              setDraft({
+                                ...draft,
+                                followup_authorized: e.target.checked,
+                              })
+                            }
+                          />
+                          I authorize this exact single follow-up using the same
+                          account, recipient and attachments after the initial
+                          message is approved, only if reply checks succeed and
+                          no reply/decline/opt-out is known.
+                        </label>
+                      </>
+                    )}
+                  </fieldset>
+                )}
                 <fieldset>
                   <legend>Attachments for this professor</legend>
                   {state.documents.map((d) => (
@@ -1459,6 +1842,7 @@ export default function Home() {
                           setDraft({
                             ...draft,
                             authorized: false,
+                            followup_authorized: false,
                             attachments: e.target.checked
                               ? [...draft.attachments, d.id]
                               : draft.attachments.filter((x) => x !== d.id),
@@ -1486,6 +1870,7 @@ export default function Home() {
                           ...draft,
                           scheduled_at: e.target.value,
                           authorized: false,
+                          followup_authorized: false,
                         })
                       }
                     />
@@ -1501,6 +1886,7 @@ export default function Home() {
                           ...draft,
                           timezone: e.target.value,
                           authorized: false,
+                          followup_authorized: false,
                         })
                       }
                     />
@@ -1522,8 +1908,11 @@ export default function Home() {
                     />
                     <span>
                       I reviewed this exact subject, body, recipient, schedule,
-                      and attachments. I explicitly authorize its automatic mock
-                      delivery without another approval.
+                      and attachments. I explicitly authorize its automatic{" "}
+                      {draft.sending_account_id
+                        ? "LIVE controlled-test email delivery from the selected account"
+                        : "mock delivery (no real email)"}{" "}
+                      without another approval.
                     </span>
                   </label>
                 )}
@@ -1532,7 +1921,9 @@ export default function Home() {
                   disabled={busy || !professors.length}
                 >
                   {draft.mode === "auto"
-                    ? "Authorize & schedule mock email"
+                    ? draft.sending_account_id
+                      ? "Authorize & schedule LIVE test email"
+                      : "Authorize & schedule mock email"
                     : "Save draft for review"}
                   <Send size={16} />
                 </button>
@@ -1547,6 +1938,46 @@ export default function Home() {
                 </div>
                 <h3>{review.subject}</h3>
                 <pre className="email-preview">{review.body}</pre>
+                {state.transports
+                  .filter((t) => t.message_id === review.id)
+                  .map((t) => (
+                    <p className="helper" key={t.message_id}>
+                      Sending account:{" "}
+                      {
+                        state.connections.find((a) => a.id === t.connection_id)
+                          ?.address
+                      }{" "}
+                      ? Transport: {t.state}
+                      {t.provider_id
+                        ? " ? Confirmed provider message " + t.provider_id
+                        : ""}
+                    </p>
+                  ))}
+                {state.automation
+                  .filter((a) => a.message_id === review.id)
+                  .map((a) => (
+                    <div key={a.message_id}>
+                      <h3>Preauthorized first follow-up after {a.days} days</h3>
+                      <strong>{a.subject}</strong>
+                      <pre className="email-preview">{a.body}</pre>
+                      {!a.generated && (
+                        <button
+                          className="secondary"
+                          disabled={busy}
+                          onClick={() =>
+                            act(async () => {
+                              await request(
+                                `/messages/${review.id}/automation/cancel`,
+                                "POST",
+                              );
+                            }, "Automatic follow-up cancelled")
+                          }
+                        >
+                          Cancel automatic follow-up
+                        </button>
+                      )}
+                    </div>
+                  ))}
                 <p className="helper">
                   {displayDate(review.scheduled_at, review.timezone)} ·{" "}
                   {review.timezone}
@@ -1560,6 +1991,29 @@ export default function Home() {
                     )
                     .join(", ") || "None"}
                 </p>
+                {review.status === "sent" && (
+                  <div className="control-buttons">
+                    {(["decline", "opt_out", "bounce"] as const).map((kind) => (
+                      <button
+                        className="secondary"
+                        key={kind}
+                        disabled={busy}
+                        onClick={() =>
+                          act(async () => {
+                            await request(
+                              `/messages/${review.id}/outcome`,
+                              "POST",
+                              { kind },
+                            );
+                            setReview(null);
+                          }, "Recipient outcome recorded; further live sending is blocked")
+                        }
+                      >
+                        Record {kind.replace("_", " ")}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {review.status === "draft" && (
                   <button
                     className="primary"
@@ -1570,7 +2024,7 @@ export default function Home() {
                           ids: [review.id],
                         });
                         setReview(null);
-                      }, "Reviewed email approved for mock delivery")
+                      }, "Reviewed email approved for its selected mailbox")
                     }
                   >
                     <Check size={16} /> Approve this exact email
