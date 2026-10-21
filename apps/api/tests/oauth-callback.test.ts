@@ -337,3 +337,24 @@ describe("safe attribution of generic OAuth callback server failures", () => {
     );
   });
 });
+
+it("does not save a mailbox after its initiating session is revoked during provider exchange", async () => {
+  const user = await h.user();
+  const flow = await attempt(user);
+  const normal = providerMock("gmail");
+  const network = vi.fn(async (url: any, init: any) => {
+    const response = await normal(url, init);
+    if (String(url).includes("/userinfo"))
+      h.db.prepare("DELETE FROM sessions WHERE user_id=?").run(user.id);
+    return response;
+  });
+  await expect(
+    finishOAuth(
+      h.env,
+      new Request(flow.callback, { headers: { Cookie: flow.binding } }),
+      "gmail",
+      network,
+    ),
+  ).rejects.toMatchObject({ status: 401 });
+  expect(h.db.prepare("SELECT COUNT(*) n FROM connections").get()!.n).toBe(0);
+});

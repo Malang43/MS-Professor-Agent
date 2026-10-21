@@ -2,21 +2,25 @@
 
 Prepared 2026-10-21 for private repository `Malang43/MS-Professor-Agent`. The mock-default application was deployed with explicit authorization on 2026-10-21. See [the production deployment report](docs/DEPLOYMENT-STATUS.md) for live URLs, resource IDs, verification results, and remaining tasks. Default production uses **Vercel Hobby + Workers Free + D1 Free + Workers KV Free**. No card, trial, paid upgrade, R2 subscription, purchased domain or real professor outreach is authorized. If an account/setup step requires payment details or an ineligible plan, stop that step and report it. No unlimited free usage is promised.
 
+## Account and Research Studio release
+
+See [STUDIO-RELEASE.md](docs/STUDIO-RELEASE.md) for the additive 0003 account-security migration, identity/verification/recovery/deletion behavior, responsive light/dark UI, validation and owner setup. Existing accounts retain legacy access; new accounts are gated until genuine email verification. Transactional delivery is unconfigured and must not be claimed operational. The current owner production Groq configuration is enabled and must be preserved during release, alongside Gmail credentials, encryption key, administrator quota allowlist and LIVE_EMAIL_ENABLED=false. Source defaults remain mocked/disabled for new deployments. No migration deletes existing production data or resets quotas.
+
 ## Current readiness
 
 For the October 21 live quota, Gmail and stopped-outreach investigation, see [PRODUCTION-DIAGNOSIS.md](docs/PRODUCTION-DIAGNOSIS.md). The owner OAuth allowance is 5 starts per UTC day, shared by Gmail and Outlook, including failed/cancelled attempts. The observed October 21 allowance resets October 22 at 05:00 AM Asia/Karachi. The quota reporting fix was approved for commit, push and Worker deployment on October 21; limits and existing credentials must remain unchanged.
 
-| Component | State |
-| --- | --- |
-| Profiles, imports, dashboard, approvals, UTC scheduling, mock drafting/delivery and audit | Implemented; existing tests preserved |
-| KV uploads/downloads/deletion, quotas, expiry and cleanup | Implemented; fault tests and real local Worker smoke check passed |
-| Same-origin Vercel proxy, cookies, CSRF and no-store | Production Chromium signup/login/logout, import, upload/download/delete, isolation, CSRF and no-store checks passed; small-height sidebar limitation recorded |
-| Gmail/Outlook OAuth, encrypted tokens, refresh/disconnect and API adapters | Implemented and mocked-tested; registrations, credentials, consent and live certification missing |
-| Outbox, claims, quotas, uncertain reconciliation, replies and capped follow-up | Implemented with mocked-provider tests; live sending disabled |
-| Groq | Optional safe template selection implemented; key/model/free-account confirmation missing; fallback works |
-| Cloudflare access | Authenticated account; Workers Free confirmed by owner; D1 and KV created and migrated, Worker deployed; no R2 |
-| Vercel access | Authenticated as malang43; m-farhat-mehdi Hobby scope verified; frontend deployed using CLI |
-| Production | Mock production verified; OAuth enabled for connection testing; real sending and Groq remain off |
+| Component                                                                                 | State                                                                                                                                                         |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Profiles, imports, dashboard, approvals, UTC scheduling, mock drafting/delivery and audit | Implemented; existing tests preserved                                                                                                                         |
+| KV uploads/downloads/deletion, quotas, expiry and cleanup                                 | Implemented; fault tests and real local Worker smoke check passed                                                                                             |
+| Same-origin Vercel proxy, cookies, CSRF and no-store                                      | Production Chromium signup/login/logout, import, upload/download/delete, isolation, CSRF and no-store checks passed; small-height sidebar limitation recorded |
+| Gmail/Outlook OAuth, encrypted tokens, refresh/disconnect and API adapters                | Implemented and mocked-tested; registrations, credentials, consent and live certification missing                                                             |
+| Outbox, claims, quotas, uncertain reconciliation, replies and capped follow-up            | Implemented with mocked-provider tests; live sending disabled                                                                                                 |
+| Groq                                                                                      | Optional safe template selection implemented; key/model/free-account confirmation missing; fallback works                                                     |
+| Cloudflare access                                                                         | Authenticated account; Workers Free confirmed by owner; D1 and KV created and migrated, Worker deployed; no R2                                                |
+| Vercel access                                                                             | Authenticated as malang43; m-farhat-mehdi Hobby scope verified; frontend deployed using CLI                                                                   |
+| Production                                                                                | Mock production verified; OAuth enabled for connection testing; real sending and Groq remain off                                                              |
 
 ## Temporary administrator OAuth test allowance
 
@@ -36,19 +40,19 @@ Validation: **88 tests passed**, both workspace TypeScript checks and production
 
 Install from repository root with Node 24 LTS and `npm ci`. The frontend root is **`apps/web`**. Next.js keeps `output: "export"`, generates `apps/web/out`, and disables slash redirects so API paths remain unchanged. Worker code is `apps/api/src/index.ts`; migrations are `apps/api/migrations`.
 
-| Vercel setting | Value |
-| --- | --- |
-| Repository | Private `Malang43/MS-Professor-Agent`; grant only required GitHub App access |
-| Plan | Hobby only if eligible; never upgrade or provide a card |
-| Framework / Root | Next.js / `apps/web` |
-| Include outside-root files | Enabled for shared workspace/lockfile |
-| Node | 24.x |
-| Install override | `cd ../.. && npm ci` |
-| Build | `npm run build` from frontend root |
-| Output | Framework default, override off; export creates `out` |
-| Production branch | `main` |
-| Frontend API env | None; remove obsolete `NEXT_PUBLIC_API_URL` |
-| Hostname | Exact stable `https://YOUR_PROJECT.vercel.app` |
+| Vercel setting             | Value                                                                        |
+| -------------------------- | ---------------------------------------------------------------------------- |
+| Repository                 | Private `Malang43/MS-Professor-Agent`; grant only required GitHub App access |
+| Plan                       | Hobby only if eligible; never upgrade or provide a card                      |
+| Framework / Root           | Next.js / `apps/web`                                                         |
+| Include outside-root files | Enabled for shared workspace/lockfile                                        |
+| Node                       | 24.x                                                                         |
+| Install override           | `cd ../.. && npm ci`                                                         |
+| Build                      | `npm run build` from frontend root                                           |
+| Output                     | Framework default, override off; export creates `out`                        |
+| Production branch          | `main`                                                                       |
+| Frontend API env           | None; remove obsolete `NEXT_PUBLIC_API_URL`                                  |
+| Hostname                   | Exact stable `https://YOUR_PROJECT.vercel.app`                               |
 
 Keep the platform-level rewrite in **`apps/web/vercel.json`**:
 
@@ -86,14 +90,14 @@ D1 owns file metadata, checksums, expiry, lifecycle and access control. KV store
 
 Deletion hides access in D1 immediately; stale KV replicas cannot bypass the owner/state check. Physical cleanup is deferred at least two minutes and retried on failure. Pending message/armed-follow-up references block deletion. User quota releases after successful cleanup; global deleted reservations count until expiry to conservatively account for physical retention. Cron reaps abandoned/expired objects in small batches. Use a dedicated namespace.
 
-| Application guard | Limit |
-| --- | --- |
-| File | 2 MiB; PDF/DOCX/TXT with type/extension/signature checks |
-| Student | 10 active/reserved files, 20 MiB |
-| Global reserved bytes | 100 MiB, including deleted KV rows until expiry |
-| Upload attempts | 10/student/day, 100/application/day |
-| Document reads / deletes | 10,000 reads/day; 100 physical deletes/day globally |
-| Live attachments | At most 3 totaling 2 MiB |
+| Application guard        | Limit                                                    |
+| ------------------------ | -------------------------------------------------------- |
+| File                     | 2 MiB; PDF/DOCX/TXT with type/extension/signature checks |
+| Student                  | 10 active/reserved files, 20 MiB                         |
+| Global reserved bytes    | 100 MiB, including deleted KV rows until expiry          |
+| Upload attempts          | 10/student/day, 100/application/day                      |
+| Document reads / deletes | 10,000 reads/day; 100 physical deletes/day globally      |
+| Live attachments         | At most 3 totaling 2 MiB                                 |
 
 PDF active-content markers and unsafe DOCX containers are conservatively rejected; this is **not antivirus or comprehensive parsing**. Downloads use encoded safe filenames, attachment disposition and nosniff; no document becomes public or trusted HTML. JSON and multipart body streams are bounded even without Content-Length.
 
@@ -104,7 +108,7 @@ KV currently includes finite Free allowances (including 1 GB storage and limited
 1. Review code/commit and no-card plan eligibility. Check Git auto-deploy hooks **before pushing**.
 2. Approve Wrangler sign-in; select intended account and Workers Free. Never use a temporary preview account to bypass authorization.
 3. After resource approval, create one D1 database and one KV namespace. Fill default production IDs; keep local emulator IDs separate. Choose the free workers.dev endpoint and exact canonical Vercel hostname.
-4. Apply both remote migrations, then deploy the **default** Worker with integration/live defaults off. Verify bindings, health and origin rejection.
+4. Apply all reviewed remote migrations, then deploy the **default** Worker with integration/live defaults off. Verify bindings, health and origin rejection.
 5. Fill the fixed Vercel destination and settings, then deploy only the reviewed/approved revision. Perform browser/edge QA before personal data.
 6. Optional registrations/secrets/consent do not authorize sending. A live test needs separate approval naming controlled addresses.
 
@@ -165,7 +169,7 @@ All required external inputs/approvals are here. Never paste secrets into chat, 
 
 ## Local verification and rollback
 
-Run `npm run typecheck`, `npm test`, `npm run build`, and `npm audit`. Tests apply both actual migrations and enforce D1 binding counts. Provider HTTP is mocked, not sent to live services. Real local Worker smoke checks use emulated D1/KV. `scripts/smoke.mjs` rejects non-local endpoints.
+Run `npm run typecheck`, `npm test`, `npm run build`, and `npm audit`. Tests apply all actual migrations and enforce D1 binding counts. Provider HTTP is mocked, not sent to live services. Real local Worker smoke checks use emulated D1/KV. `scripts/smoke.mjs` rejects non-local endpoints.
 
 For isolated smoke state, from `apps/api`:
 
@@ -174,7 +178,7 @@ npx wrangler d1 migrations apply outreach --env local --local --persist-to .wran
 npx wrangler dev --env local --local --port 8791 --persist-to .wrangler/readiness-release
 ```
 
-Then from root, with `SMOKE_API_URL=http://localhost:8791/api`, run `node scripts/smoke.mjs`. State stays ignored and separate from the user's normal database. Optional local R2 is emulated only, with no subscription. The readiness run passed 59 automated tests, real local KV/D1 smoke checks (deletion/isolation/session revocation), and a local cron invocation. A production dependency audit reported zero known vulnerabilities. Final full check results are in `docs/READINESS.md`.
+Then from root, with `SMOKE_API_URL=http://localhost:8791/api` and `SMOKE_D1_PERSIST_PATH` set to the absolute `.wrangler/readiness-release` directory used above, run `node scripts/smoke.mjs`. State stays ignored and separate from the user's normal database. Optional local R2 is emulated only, with no subscription. The readiness run passed 59 automated tests, real local KV/D1 smoke checks (deletion/isolation/session revocation), and a local cron invocation. A production dependency audit reported zero known vulnerabilities. Final full check results are in `docs/READINESS.md`.
 
 For updates, apply reviewed compatible migrations before code that needs them. Vercel/Worker rollback does not undo D1 data/schema. Restore backups through a reviewed plan. Do not roll back to old code that might treat a live outbox row as mock delivery.
 

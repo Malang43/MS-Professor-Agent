@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  accountPublic,
+  accountPrivate,
+  requireVerified,
+  cleanDeletedAccounts,
+} from "./accounts";
 import { type Env, HttpError, consume } from "./runtime";
 export type { Env } from "./runtime";
 import {
@@ -16,7 +22,7 @@ import {
   transportSnapshot,
   liveEnabled,
 } from "./automation";
-import { generateDraft } from "./ai";
+import { generateDraft, templateDraft } from "./ai";
 const id = () => crypto.randomUUID();
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 const email = z
@@ -84,32 +90,7 @@ async function digest(value: string) {
     (b) => b.toString(16).padStart(2, "0"),
   ).join("");
 }
-export async function passwordHash(password: string, salt = id()) {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(password),
-    "PBKDF2",
-    false,
-    ["deriveBits"],
-  );
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      salt: new TextEncoder().encode(salt),
-      iterations: 100000,
-      hash: "SHA-256",
-    },
-    key,
-    256,
-  );
-  return (
-    salt +
-    ":" +
-    Array.from(new Uint8Array(bits), (b) =>
-      b.toString(16).padStart(2, "0"),
-    ).join("")
-  );
-}
+export { passwordHash } from "./passwords";
 const audit = (env: Env, user: string, action: string, entity = "") =>
   env.DB.prepare(
     "INSERT INTO audit(id,user_id,action,entity_id) VALUES(?,?,?,?)",
@@ -176,78 +157,8 @@ async function route(req: Request, env: Env): Promise<Response> {
   const callback = path.match(/^\/api\/oauth\/(gmail|outlook)\/callback$/);
   if (callback && method === "GET")
     return finishOAuth(env, req, callback[1] as "gmail" | "outlook");
-  if (path === "/api/auth/signup" || path === "/api/auth/login") {
-    if (method !== "POST") return json({ error: "Method not allowed" }, 405);
-    if (path.endsWith("signup")) {
-      await consume(env, "signup:global", 50);
-      await consume(
-        env,
-        "signup:" +
-          (await digest(req.headers.get("CF-Connecting-IP") || "local")),
-        10,
-      );
-    }
-    const input = z
-      .object({ email, password: z.string().min(12).max(128) })
-      .parse(await req.json());
-    const key = await digest(
-      (req.headers.get("CF-Connecting-IP") || "local") + ":" + input.email,
-    );
-    await env.DB.prepare(
-      "INSERT INTO login_attempts(key,count,reset_at) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count=CASE WHEN reset_at<? THEN 1 ELSE count+1 END,reset_at=CASE WHEN reset_at<? THEN excluded.reset_at ELSE reset_at END",
-    )
-      .bind(key, Date.now() + 900000, Date.now(), Date.now())
-      .run();
-    const attempt = await env.DB.prepare(
-      "SELECT count FROM login_attempts WHERE key=?",
-    )
-      .bind(key)
-      .first<{ count: number }>();
-    if ((attempt?.count || 0) > 15)
-      return json(
-        { error: "Too many attempts. Try again in 15 minutes." },
-        429,
-      );
-    let user = await env.DB.prepare("SELECT * FROM users WHERE email=?")
-      .bind(input.email)
-      .first<{ id: string; password: string }>();
-    if (path.endsWith("signup")) {
-      if (user)
-        return json(
-          { error: "Unable to create account with those details." },
-          409,
-        );
-      const userId = id();
-      await env.DB.batch([
-        env.DB.prepare(
-          "INSERT INTO users(id,email,password) VALUES(?,?,?)",
-        ).bind(userId, input.email, await passwordHash(input.password)),
-        env.DB.prepare("INSERT INTO profiles(user_id) VALUES(?)").bind(userId),
-        audit(env, userId, "account.created"),
-      ]);
-      user = { id: userId, password: "" };
-    } else if (
-      !user ||
-      (await passwordHash(input.password, user.password.split(":")[0])) !==
-        user.password
-    )
-      return json({ error: "Invalid email or password" }, 401);
-    const token = Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) =>
-      b.toString(16).padStart(2, "0"),
-    ).join("");
-    await env.DB.prepare(
-      "INSERT INTO sessions(token,user_id,expires_at) VALUES(?,?,?)",
-    )
-      .bind(await digest(token), user.id, Date.now() + 7 * 86400000)
-      .run();
-    const secure = url.protocol === "https:" ? "; Secure" : "";
-    return new Response(JSON.stringify({ ok: true }), {
-      headers: {
-        "Content-Type": "application/json",
-        "Set-Cookie": `session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800${secure}`,
-      },
-    });
-  }
+  const publicAccount = await accountPublic(req, env);
+  if (publicAccount) return publicAccount;
   const user = await authenticated(req, env);
   if (path === "/api/auth/logout") {
     if (method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -266,6 +177,9 @@ async function route(req: Request, env: Env): Promise<Response> {
       },
     });
   }
+  const privateAccount = await accountPrivate(req, env, user);
+  if (privateAccount) return privateAccount;
+  await requireVerified(env, user);
   const connectionStart = path.match(
     /^\/api\/connections\/(gmail|outlook)\/start$/,
   );
@@ -376,7 +290,11 @@ async function route(req: Request, env: Env): Promise<Response> {
         )
           .bind(user)
           .all(),
-        env.DB.prepare("SELECT email FROM users WHERE id=?").bind(user).first(),
+        env.DB.prepare(
+          "SELECT email,first_name,last_name,display_name,email_verified_at,legacy_access FROM users WHERE id=?",
+        )
+          .bind(user)
+          .first(),
       ]);
     const attachments = await env.DB.prepare(
       "SELECT * FROM message_attachments WHERE user_id=?",
@@ -460,6 +378,35 @@ async function route(req: Request, env: Env): Promise<Response> {
     ]);
     return json({ ok: true });
   }
+  const professorEdit = path.match(/^\/api\/professors\/([^/]+)$/);
+  if (professorEdit && method === "PUT") {
+    await owned(env, "professors", professorEdit[1], user);
+    const input = professorSchema.parse(await req.json());
+    const duplicate = await env.DB.prepare(
+      "SELECT id FROM professors WHERE user_id=? AND email=? AND id!=?",
+    )
+      .bind(user, input.email, professorEdit[1])
+      .first();
+    if (duplicate)
+      throw new HttpError(
+        409,
+        "A professor with that email is already on your shortlist.",
+      );
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE professors SET name=?,email=?,university=?,interests=?,source_url=NULL,verified_at=NULL WHERE id=? AND user_id=?",
+      ).bind(
+        input.name,
+        input.email,
+        input.university,
+        input.interests,
+        professorEdit[1],
+        user,
+      ),
+      audit(env, user, "professor.updated", professorEdit[1]),
+    ]);
+    return json({ ok: true });
+  }
   const professorVerify = path.match(/^\/api\/professors\/([^/]+)\/verify$/);
   if (professorVerify && method === "POST") {
     await owned(env, "professors", professorVerify[1], user);
@@ -520,8 +467,15 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   if (path === "/api/draft" && method === "POST") {
-    const { professor_id } = z
-      .object({ professor_id: z.string().uuid() })
+    const { professor_id, template, tone, manual_template } = z
+      .object({
+        professor_id: z.string().uuid(),
+        template: z.number().int().min(0).max(2).default(0),
+        tone: z
+          .enum(["professional", "concise", "warm"])
+          .default("professional"),
+        manual_template: z.boolean().default(false),
+      })
       .parse(await req.json());
     const p = await owned(env, "professors", professor_id, user);
     const profile = await env.DB.prepare(
@@ -529,7 +483,21 @@ async function route(req: Request, env: Env): Promise<Response> {
     )
       .bind(user)
       .first();
-    return json(await generateDraft(env, user, profile || {}, p));
+    const draft =
+      manual_template || env.AI_PROVIDER !== "groq"
+        ? templateDraft(profile || {}, p, template)
+        : await generateDraft(env, user, profile || {}, p);
+    if (tone === "concise")
+      draft.body = draft.body.replace(
+        "I would be grateful to discuss whether my background could contribute to your research and whether funded positions or scholarships may be available.",
+        "Could we discuss suitable MS research opportunities?",
+      );
+    if (tone === "warm")
+      draft.body = draft.body.replace(
+        "Thank you for your time.",
+        "Thank you for considering my inquiry. I appreciate your time.",
+      );
+    return json(draft);
   }
   if (path === "/api/messages" && method === "POST") {
     const m = messageSchema.parse(await req.json());
@@ -878,6 +846,7 @@ export default {
     } else if (phase === 1) await runLiveJobs(env);
     else {
       await cleanDocuments(env);
+      await cleanDeletedAccounts(env);
       await env.DB.prepare(
         "DELETE FROM oauth_states WHERE state_hash IN (SELECT state_hash FROM oauth_states WHERE expires_at<? LIMIT 20)",
       )

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 
 // Optional runtime check against an already running local Wrangler API.
 // Creates one isolated smoke account in local storage; never targets production.
@@ -15,7 +17,47 @@ if (
   smokeUrl.hash
 )
   throw new Error("Smoke checks must target a local /api endpoint only.");
+const persist = process.env.SMOKE_D1_PERSIST_PATH;
+if (!persist)
+  throw new Error(
+    "Set SMOKE_D1_PERSIST_PATH to the same isolated local Wrangler state directory used by the API.",
+  );
 let cookie = "";
+async function verifiedLocalSignup() {
+  const email = "smoke-" + randomUUID() + "@example.invalid",
+    password = randomUUID();
+  await api("/auth/signup", "POST", {
+    email,
+    password,
+    confirm_password: password,
+    first_name: "Local",
+    last_name: "Smoke",
+    accept_terms: true,
+  });
+  // Explicit local fixture only: there is no production verification bypass endpoint.
+  execFileSync(
+    process.execPath,
+    [
+      "../../node_modules/wrangler/bin/wrangler.js",
+      "d1",
+      "execute",
+      "outreach",
+      "--env",
+      "local",
+      "--local",
+      "--persist-to",
+      resolve(persist),
+      "--command",
+      "UPDATE users SET email_verified_at=" +
+        Date.now() +
+        " WHERE email='" +
+        email +
+        "'",
+    ],
+    { cwd: resolve("apps/api"), stdio: "pipe" },
+  );
+  await api("/auth/login", "POST", { email, password });
+}
 async function api(path, method = "GET", body) {
   const response = await fetch(base + path, {
     method,
@@ -42,10 +84,7 @@ assert.equal(
   false,
   "Smoke checks require real sending disabled",
 );
-await api("/auth/signup", "POST", {
-  email: `smoke-${randomUUID()}@example.com`,
-  password: randomUUID(),
-});
+await verifiedLocalSignup();
 await api("/professors", "POST", [
   { name: "Runtime Smoke Professor", email: "prof@example.edu" },
 ]);
@@ -76,10 +115,7 @@ const state = await api("/state");
 assert.equal(state.messages[0].status, "sent");
 assert.equal(state.audit.filter((a) => a.action === "mock.sent").length, 1);
 const ownerCookie = cookie;
-await api("/auth/signup", "POST", {
-  email: `smoke-other-${randomUUID()}@example.com`,
-  password: randomUUID(),
-});
+await verifiedLocalSignup();
 assert.equal((await api("/state")).documents.length, 0);
 assert.equal(
   (await fetch(base + "/documents/" + doc.id, { headers: { Cookie: cookie } }))

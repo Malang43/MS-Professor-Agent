@@ -190,7 +190,7 @@ export async function uploadDocument(req: Request, env: Env, user: string) {
   await consume(env, "kv-write:global", 100);
   await consume(env, `kv-write:${user}`, 10);
   const reserved = await env.DB.prepare(
-    `INSERT INTO documents(id,user_id,name,object_key,content_type,size,storage_backend,storage_state,checksum,expires_at) SELECT ?,?,?,?,?,?,'kv','uploading',?,? WHERE (SELECT COALESCE(SUM(size),0) FROM documents WHERE user_id=? AND storage_state!='deleted')+?<=? AND (SELECT count(*) FROM documents WHERE user_id=? AND storage_state!='deleted')<10 AND (SELECT COALESCE(SUM(size),0) FROM documents WHERE storage_backend='kv' AND (expires_at IS NULL OR expires_at>unixepoch()*1000))+?<=? RETURNING id`,
+    `INSERT INTO documents(id,user_id,name,object_key,content_type,size,storage_backend,storage_state,checksum,expires_at) SELECT ?,?,?,?,?,?,'kv','uploading',?,? WHERE (SELECT COALESCE(SUM(size),0) FROM documents WHERE user_id=? AND storage_state!='deleted')+?<=? AND (SELECT count(*) FROM documents WHERE user_id=? AND storage_state!='deleted')<10 AND (SELECT COALESCE(SUM(size),0) FROM documents WHERE storage_backend='kv' AND (expires_at IS NULL OR expires_at>unixepoch()*1000))+(SELECT COALESCE(SUM(size),0) FROM account_deletion_objects WHERE backend='kv' AND expires_at>unixepoch()*1000)+?<=? RETURNING id`,
   )
     .bind(
       docId,

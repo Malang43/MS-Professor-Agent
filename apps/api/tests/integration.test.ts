@@ -81,7 +81,22 @@ async function call(
   cookie = "",
   origin = "http://localhost:3000",
 ) {
-  return worker.fetch(
+  // Historical workspace tests use explicitly verified signup fixtures; account tests exercise pending users.
+  if (
+    path === "/auth/signup" &&
+    data &&
+    typeof data === "object" &&
+    "password" in data &&
+    String(data.password).length >= 15
+  )
+    data = {
+      ...data,
+      first_name: "Test",
+      last_name: "Student",
+      confirm_password: data.password,
+      accept_terms: true,
+    };
+  const response = await worker.fetch(
     new Request("http://localhost:8787/api" + path, {
       method,
       headers: {
@@ -100,6 +115,20 @@ async function call(
     }),
     env,
   );
+  if (path === "/auth/signup" && response.status === 200) {
+    db.prepare("UPDATE users SET email_verified_at=? WHERE email=?").run(
+      Date.now(),
+      (data as any).email,
+    );
+    return call(
+      "/auth/login",
+      "POST",
+      { email: (data as any).email, password: (data as any).password },
+      "",
+      origin,
+    );
+  }
+  return response;
 }
 async function signup(email = "student@example.com") {
   const r = await call("/auth/signup", "POST", {
@@ -500,18 +529,31 @@ async function withProxy(run: (base: string) => Promise<void>) {
 describe("same-origin API reverse proxy", () => {
   it("preserves HTTPS login/logout, private bounded uploads, downloads and account isolation over HTTP hops", async () => {
     await withProxy(async (base) => {
-      const api = (
+      const api = async (
         path: string,
         method = "GET",
         body?: unknown,
         cookie = "",
         origin: string | null = frontendOrigin,
-      ) => {
+      ): Promise<Response> => {
         const headers = new Headers(cookie ? { Cookie: cookie } : {});
         if (origin !== null) headers.set("Origin", origin);
         if (body && !(body instanceof FormData))
           headers.set("Content-Type", "application/json");
-        return fetch(base + "/api" + path, {
+        if (
+          path === "/auth/signup" &&
+          body &&
+          typeof body === "object" &&
+          "password" in body
+        )
+          body = {
+            ...body,
+            first_name: "Proxy",
+            last_name: "Student",
+            confirm_password: body.password,
+            accept_terms: true,
+          };
+        const response = await fetch(base + "/api" + path, {
           method,
           headers,
           body:
@@ -522,6 +564,20 @@ describe("same-origin API reverse proxy", () => {
                 : undefined,
           redirect: "manual",
         });
+        if (path === "/auth/signup" && response.status === 200) {
+          db.prepare("UPDATE users SET email_verified_at=? WHERE email=?").run(
+            Date.now(),
+            (body as any).email,
+          );
+          return api(
+            "/auth/login",
+            "POST",
+            { email: (body as any).email, password: (body as any).password },
+            "",
+            origin,
+          );
+        }
+        return response;
       };
       const signupResponse = await api("/auth/signup", "POST", {
         email: "proxy-a@example.com",
@@ -568,12 +624,12 @@ describe("same-origin API reverse proxy", () => {
       ).toBe(405);
       expect((await api("/state", "GET", undefined, cookieA)).status).toBe(200);
       const configuredHeaders = Object.fromEntries(
-        proxyConfig.headers[0].headers.map(
-          (header: { key: string; value: string }) => [
+        proxyConfig.headers
+          .find((rule: { source: string }) => rule.source === "/api/:path*")!
+          .headers.map((header: { key: string; value: string }) => [
             header.key,
             header.value,
-          ],
-        ),
+          ]),
       );
       expect(configuredHeaders["x-vercel-enable-rewrite-caching"]).toBe("0");
       const bytes = new Uint8Array(FILE_LIMIT).fill(65);

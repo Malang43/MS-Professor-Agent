@@ -1,0 +1,2 @@
+name,email,university,interests,subject,body,scheduled_at,timezone
+Professor Example,professor@example.edu,Example University,Robotics,MS research inquiry,"Dear Professor Example, I would like to discuss possible MS research directions. Please review and personalize this example before approval.",2099-01-01T12:00:00.000Z,UTC

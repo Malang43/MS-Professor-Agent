@@ -1,5 +1,10 @@
 export interface Env {
   DB: D1Database;
+  MAIL_PROVIDER?: string;
+  MAIL_DELIVERY_ENABLED?: string;
+  MAIL_FREE_PLAN_CONFIRMED?: string;
+  MAIL_FROM?: string;
+  BREVO_API_KEY?: string;
   DOCUMENTS_KV?: KVNamespace;
   DOCUMENTS?: R2Bucket; // Optional legacy adapter, not a production dependency.
   APP_ORIGIN: string;
@@ -82,7 +87,9 @@ export async function consume(
       ? Date.parse(period + "T00:00:00.000Z") + 86400000
       : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(period)
         ? Date.parse(period + ":00.000Z") + 60000
-        : NaN;
+        : /^\d{4}-\d{2}-\d{2}T\d{2}$/.test(period)
+          ? Date.parse(period + ":00:00.000Z") + 3600000
+          : NaN;
     const retry = Number.isFinite(end)
       ? Math.max(1, Math.ceil((end - Date.now()) / 1000))
       : 60;

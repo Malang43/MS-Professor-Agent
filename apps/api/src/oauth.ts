@@ -338,8 +338,8 @@ export async function finishOAuth(
       tokens,
     );
     category = "connection_save";
-    await env.DB.prepare(
-      `INSERT INTO connections(id,user_id,provider,address,subject,status,scopes,tokens,expires_at) VALUES(?,?,?,?,?,'connected',?,?,?) ON CONFLICT(user_id,provider,subject) DO UPDATE SET address=excluded.address,status='connected',scopes=excluded.scopes,tokens=excluded.tokens,expires_at=excluded.expires_at,refresh_lease=NULL,refresh_until=0`,
+    const saved = await env.DB.prepare(
+      `INSERT INTO connections(id,user_id,provider,address,subject,status,scopes,tokens,expires_at) SELECT ?,?,?,?,?,'connected',?,?,? WHERE EXISTS(SELECT 1 FROM sessions WHERE token=? AND user_id=? AND expires_at>?) ON CONFLICT(user_id,provider,subject) DO UPDATE SET address=excluded.address,status='connected',scopes=excluded.scopes,tokens=excluded.tokens,expires_at=excluded.expires_at,refresh_lease=NULL,refresh_until=0 RETURNING id`,
     )
       .bind(
         crypto.randomUUID(),
@@ -350,8 +350,15 @@ export async function finishOAuth(
         granted.join(" "),
         encrypted,
         Date.now() + tokens.expires_in * 1000,
+        row.session_hash,
+        row.user_id,
+        Date.now(),
       )
-      .run();
+      .first();
+    if (!saved) {
+      category = "session_revoked_before_save";
+      throw new HttpError(401, "Session expired; sign in and reconnect.");
+    }
     await notify(
       env,
       row.user_id,
@@ -457,6 +464,33 @@ export async function accessToken(
       .run();
   }
 }
+export async function revokeMailboxTokens(
+  env: Env,
+  user: string,
+  row: { provider: string; tokens: string | null },
+  network: Fetcher = fetch,
+) {
+  if (row.provider !== "gmail" || !row.tokens) return false;
+  try {
+    const tokens = await decrypt<TokenSet>(
+      env,
+      context(user, row.provider),
+      row.tokens,
+    );
+    const response = await network("https://oauth2.googleapis.com/revoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token: tokens.refresh_token }),
+      signal: AbortSignal.timeout(10000),
+      redirect: "manual",
+    });
+    const revoked = response.ok;
+    await response.body?.cancel();
+    return revoked;
+  } catch {
+    return false;
+  }
+}
 export async function disconnect(
   env: Env,
   user: string,
@@ -483,29 +517,14 @@ export async function disconnect(
       "UPDATE automation SET generated=1 WHERE message_id IN (SELECT message_id FROM transports WHERE connection_id=?)",
     ).bind(id),
   ]);
-  if (row.provider === "gmail" && row.tokens) {
-    try {
-      const tokens = await decrypt<TokenSet>(
-        env,
-        context(user, row.provider),
-        row.tokens,
-      );
-      await network("https://oauth2.googleapis.com/revoke", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ token: tokens.refresh_token }),
-        signal: AbortSignal.timeout(10000),
-        redirect: "error",
-      });
-    } catch {
-      /* Local revocation is already authoritative. */
-    }
-  }
+  const revoked = await revokeMailboxTokens(env, user, row, network);
   return Response.json({
     ok: true,
     provider_revocation:
       row.provider === "outlook"
         ? "Remove app consent in your Microsoft account to revoke provider access."
-        : "Local tokens removed; Google revocation attempted.",
+        : revoked
+          ? "Local tokens removed; Google revocation confirmed."
+          : "Local tokens removed; remove app consent in your Google account if provider revocation was unavailable.",
   });
 }

@@ -4,6 +4,12 @@ A multi-user student workspace using Next.js, TypeScript, Cloudflare Workers, D1
 
 **Default mode sends no real email and makes no AI calls.** Gmail and Microsoft Graph adapters, encrypted OAuth connections, a guarded live-test outbox and optional Groq integration are implemented and covered by mocked transport tests. They are disabled unless separately configured. A connected mailbox alone does not authorize live sending. Real sends additionally require a server-side controlled-recipient allowlist and explicit approval of the particular test.
 
+## Account and workspace release
+
+The application now includes named profiles, password visibility/strength guidance, email-verification and recovery adapters, session management, user-confirmed deletion, light/dark responsive UI, persisted dashboard metrics, private previews, professor editing and audited writing templates. See [the account/security release runbook](docs/STUDIO-RELEASE.md) for exact behavior, migration, free delivery setup and validation boundaries.
+
+New accounts require genuine email verification. Transactional delivery is currently unconfigured; a pending account can sign in to manage security but cannot access the workspace. Existing accounts retain explicit legacy access without being marked email-verified. Gmail outreach is separate from transactional account email. The current owner production Groq settings are preserved; fresh-deployment defaults remain mocked.
+
 ## Local setup
 
 Use Node.js **24 LTS** and npm. On Windows use `npm.cmd` when PowerShell blocks `npm.ps1`.
@@ -20,7 +26,7 @@ In another terminal:
 npm run dev
 ```
 
-Open http://localhost:3000 and create an account with a password of at least 12 characters. Use `localhost` consistently. There are no seed credentials. The API dev script uses the **local** Wrangler environment, local D1 and local KV. Its optional local R2 binding keeps legacy documents readable without enabling or contacting remote R2. Production configuration has only D1 and KV.
+Open http://localhost:3000 and create an account with first/last names and a unique password/passphrase of at least 15 characters. New local accounts also require verification; configure a local transactional test adapter in tests, or use the explicit isolated local smoke fixture described below. Use `localhost` consistently. There are no seed credentials. The API dev script uses the **local** Wrangler environment, local D1 and local KV. Its optional local R2 binding keeps legacy documents readable without enabling or contacting remote R2. Production configuration has only D1 and KV.
 
 Copy `.env.example` to `apps/web/.env.local` only to override the development API URL. Worker development overrides belong in ignored `apps/api/.dev.vars`. Production browser requests/downloads always use relative `/api` URLs. Never put backend secrets in frontend variables. Local data lives in ignored `apps/api/.wrangler/`.
 
@@ -62,3 +68,5 @@ The repository `Malang43/MS-Professor-Agent` is private. Never make it public, f
 ## Architecture and limits
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module boundaries, transaction/consistency design, provider limitations and existing production-hardening gaps. Password recovery, email verification/MFA, full malware scanning, universal bounce/opt-out classification and live provider certification remain outside this readiness claim. Google verification and eligible Microsoft registration may block public integrations; do not bypass them or sign up for a card-based trial.
+
+Local smoke: start Wrangler with --persist-to .wrangler/studio-readiness and set SMOKE_D1_PERSIST_PATH to that absolute directory, plus SMOKE_API_URL=http://localhost:8792/api when using port 8792. The smoke script never targets production.

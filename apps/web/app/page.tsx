@@ -1,6 +1,13 @@
 "use client";
 import { useEffect, useState, type FormEvent } from "react";
 import {
+  AuthPanel,
+  VerificationGate,
+  AccountSettings,
+  PolicyNotice,
+  type Identity,
+} from "./account-ui";
+import {
   GraduationCap,
   LayoutDashboard,
   Users,
@@ -69,6 +76,7 @@ type Message = {
   body: string;
   mode: string;
   status: string;
+  approved?: number;
   scheduled_at: string;
   timezone: string;
   followup_at: string | null;
@@ -172,7 +180,90 @@ export default function Home() {
     ),
     [review, setReview] = useState<Message | null>(null),
     [selected, setSelected] = useState<string[]>([]);
+  const [tone, setTone] = useState("professional"),
+    [template, setTemplate] = useState("0"),
+    [uploadProgress, setUploadProgress] = useState<number | null>(null),
+    [documentPreview, setDocumentPreview] = useState<{
+      name: string;
+      text: string;
+    } | null>(null);
   const [profile, setProfile] = useState<Profile>(initialProfile);
+  const [identity, setIdentity] = useState<Identity | null>(null),
+    [mailReady, setMailReady] = useState(false),
+    [theme, setTheme] = useState("light"),
+    [policy, setPolicy] = useState(""),
+    [link, setLink] = useState<{
+      kind: "verify" | "reset";
+      token: string;
+    } | null>(null),
+    [editingProfessor, setEditingProfessor] = useState(""),
+    [statusFilter, setStatusFilter] = useState("all");
+  useEffect(() => {
+    const readLink = () => {
+      const fragment = new URLSearchParams(window.location.hash.slice(1));
+      for (const kind of ["verify", "reset"] as const) {
+        const token = fragment.get(kind);
+        if (token) {
+          setLink({ kind, token });
+          history.replaceState(null, "", window.location.pathname);
+        }
+      }
+      if (["#terms", "#privacy"].includes(window.location.hash))
+        setPolicy(window.location.hash.slice(1));
+    };
+    readLink();
+    window.addEventListener("hashchange", readLink);
+    const stored =
+      localStorage.getItem("workspace-theme") ||
+      (window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light");
+    setTheme(stored);
+    document.documentElement.dataset.theme = stored;
+    return () => window.removeEventListener("hashchange", readLink);
+  }, []);
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobile(false);
+        setModal(null);
+        setReview(null);
+        setDocumentPreview(null);
+      }
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, []);
+  useEffect(() => {
+    if (!modal && !review && !documentPreview) return;
+    const previous = document.activeElement as HTMLElement;
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+    const items = () =>
+      Array.from(
+        dialog?.querySelectorAll<HTMLElement>(
+          "button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href]",
+        ) || [],
+      );
+    items()[0]?.focus();
+    const trap = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const list = items(),
+        first = list[0],
+        last = list[list.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+    dialog?.addEventListener("keydown", trap);
+    return () => {
+      dialog?.removeEventListener("keydown", trap);
+      previous?.focus();
+    };
+  }, [modal, review, documentPreview]);
   const [professor, setProfessor] = useState({
     name: "",
     email: "",
@@ -196,16 +287,68 @@ export default function Home() {
     attachments: [] as string[],
   });
   const [draftWarning, setDraftWarning] = useState("");
+  const [includeImportDrafts, setIncludeImportDrafts] = useState(false);
+  async function uploadPrivate(file: File) {
+    if (file.size > 2 * 1024 * 1024)
+      throw new Error("Document limit is 2 MiB.");
+    setUploadProgress(0);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", API + "/api/documents");
+        xhr.withCredentials = true;
+        xhr.timeout = 60000;
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable)
+            setUploadProgress(Math.round((e.loaded / e.total) * 100));
+        };
+        xhr.onerror = () =>
+          reject(
+            new Error(
+              "Upload connection interrupted. Check Documents before retrying.",
+            ),
+          );
+        xhr.ontimeout = () =>
+          reject(
+            new Error("Upload timed out. Check Documents before retrying."),
+          );
+        xhr.onload = () => {
+          let result;
+          try {
+            result = JSON.parse(xhr.responseText);
+          } catch {
+            return reject(new Error("Upload returned an unreadable response."));
+          }
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error(result.error || "Upload failed."));
+        };
+        const form = new FormData();
+        form.set("file", file);
+        xhr.send(form);
+      });
+    } finally {
+      setUploadProgress(null);
+    }
+  }
   const [verificationTarget, setVerificationTarget] =
     useState<Professor | null>(null);
   async function refresh() {
     try {
+      const me = await request("/auth/me");
+      setIdentity(me.account);
+      setMailReady(me.mail_delivery_ready);
+      if (!me.account.email_verified_at && !me.account.legacy_access) {
+        setState(null);
+        return;
+      }
       const data = await request("/state");
       setState(data);
       setProfile(data.profile);
     } catch (e) {
-      if (e instanceof Error && e.message === "Unauthorized") setState(null);
-      else throw e;
+      if (e instanceof Error && e.message === "Unauthorized") {
+        setState(null);
+        setIdentity(null);
+      } else throw e;
     } finally {
       setLoading(false);
     }
@@ -219,7 +362,7 @@ export default function Home() {
     try {
       await fn();
       await refresh();
-      setNotice(message);
+      if (message) setNotice(message);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
     } finally {
@@ -271,6 +414,36 @@ export default function Home() {
     }
     if (!rows.length || rows.length > 500)
       throw new Error("Import between 1 and 500 professors");
+    if (includeImportDrafts) {
+      if (rows.length > 25)
+        throw new Error(
+          "Import at most 25 fully specified draft emails at once. Professor-only imports still support 500 rows.",
+        );
+      for (const [i, row] of rows.entries()) {
+        if (
+          !row.subject ||
+          row.subject.length > 500 ||
+          /[\r\n]/.test(row.subject) ||
+          !row.body ||
+          row.body.length > 20000 ||
+          !row.scheduled_at ||
+          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(
+            row.scheduled_at,
+          ) ||
+          !Number.isFinite(Date.parse(row.scheduled_at))
+        )
+          throw new Error(
+            "Row " +
+              (i + 2) +
+              ": provide subject, body and scheduled_at as a complete UTC ISO timestamp.",
+          );
+        try {
+          new Intl.DateTimeFormat("en", { timeZone: row.timezone || "UTC" });
+        } catch {
+          throw new Error("Row " + (i + 2) + ": invalid IANA timezone.");
+        }
+      }
+    }
     const result = await request(
       "/professors",
       "POST",
@@ -281,16 +454,77 @@ export default function Home() {
         interests: r.interests || "",
       })),
     );
-    setNotice(
-      `${result.imported} professors imported; duplicate emails skipped.`,
-    );
+    if (includeImportDrafts) {
+      const saved = await request("/state");
+      let created = 0,
+        skipped = 0;
+      for (const row of rows) {
+        const professor = saved.professors.find(
+          (p: Professor) => p.email === row.email.toLowerCase(),
+        );
+        if (!professor)
+          throw new Error(
+            "Imported professor was unavailable; no further drafts created.",
+          );
+        const scheduled_at = new Date(row.scheduled_at).toISOString();
+        if (
+          saved.messages.some(
+            (m: Message) =>
+              m.professor_id === professor.id &&
+              m.subject === row.subject &&
+              m.body === row.body &&
+              m.scheduled_at === scheduled_at,
+          )
+        ) {
+          skipped++;
+          continue;
+        }
+        try {
+          await request("/messages", "POST", {
+            professor_id: professor.id,
+            subject: row.subject,
+            body: row.body,
+            mode: "manual",
+            authorized: false,
+            scheduled_at,
+            timezone: row.timezone || "UTC",
+            attachments: [],
+          });
+          created++;
+          saved.messages.push({
+            professor_id: professor.id,
+            subject: row.subject,
+            body: row.body,
+            scheduled_at,
+          });
+        } catch (e) {
+          throw new Error(
+            created +
+              " drafts saved before import stopped: " +
+              (e as Error).message +
+              ". Review Outreach before retrying; matching saved drafts are skipped.",
+          );
+        }
+      }
+      setNotice(
+        created +
+          " manual mock drafts prepared; " +
+          skipped +
+          " matching drafts skipped. Review exact content and select drafts for one-time batch approval in Outreach. Nothing was sent.",
+      );
+    } else
+      setNotice(
+        result.imported + " professors imported; duplicate emails skipped.",
+      );
   }
   const messages = state?.messages || [],
     professors = state?.professors || [];
-  const filtered = messages.filter((m) =>
-    (m.professor_name + " " + m.subject + " " + m.status)
-      .toLowerCase()
-      .includes(query.toLowerCase()),
+  const filtered = messages.filter(
+    (m) =>
+      (statusFilter === "all" || m.status === statusFilter) &&
+      (m.professor_name + " " + m.subject + " " + m.status)
+        .toLowerCase()
+        .includes(query.toLowerCase()),
   );
   const followups = messages.filter(
     (m) => m.followup_at && m.status === "sent",
@@ -329,102 +563,43 @@ export default function Home() {
     return (
       <main className="auth">
         <GraduationCap size={44} />
+        <div className="loading-skeleton" aria-hidden="true">
+          <div className="skeleton" />
+          <div className="skeleton" />
+          <div className="skeleton" />
+        </div>
         <p>Opening your workspace…</p>
       </main>
     );
-  if (!state)
+  if (policy)
     return (
-      <main className="auth">
-        <div className="auth-brand">
-          <GraduationCap size={32} />
-          <span>
-            MS Professor
-            <br />
-            <b>Outreach Agent</b>
-          </span>
-        </div>
-        <div className="auth-card">
-          <span className="eyebrow">YOUR NEXT CHAPTER</span>
-          <h1>
-            Research starts
-            <br />
-            with a conversation.
-          </h1>
-          <p>
-            A thoughtful workspace for your MS journey. Organize professors,
-            prepare your story, and keep every opportunity moving.
-          </p>
-          <div className="tabs">
-            <button
-              className={authMode === "login" ? "active" : ""}
-              onClick={() => setAuthMode("login")}
-            >
-              Sign in
-            </button>
-            <button
-              className={authMode === "signup" ? "active" : ""}
-              onClick={() => setAuthMode("signup")}
-            >
-              Create account
-            </button>
-          </div>
-          {feedback}
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              const data = new FormData(e.currentTarget);
-              act(async () => {
-                await request("/auth/" + authMode, "POST", {
-                  email: data.get("email"),
-                  password: data.get("password"),
-                });
-              }, "Welcome to your workspace");
-            }}
-          >
-            <label>
-              Email address
-              <input
-                name="email"
-                type="email"
-                required
-                placeholder="student@university.edu"
-                autoComplete="email"
-              />
-            </label>
-            <label>
-              Password
-              <input
-                name="password"
-                type="password"
-                minLength={12}
-                maxLength={128}
-                required
-                placeholder="At least 12 characters"
-                autoComplete={
-                  authMode === "login" ? "current-password" : "new-password"
-                }
-              />
-            </label>
-            <button className="primary full" disabled={busy}>
-              {busy
-                ? "Please wait…"
-                : authMode === "login"
-                  ? "Open my workspace"
-                  : "Create student account"}
-              <ArrowUpRight size={17} />
-            </button>
-          </form>
-          <div className="security-note">
-            <ShieldCheck size={16} /> Private workspace - Mock delivery by
-            default
-          </div>
-        </div>
-        <footer>
-          MS PROFESSOR OUTREACH AGENT{" "}
-          <span>PHASE 01 / RESEARCH WITH INTENTION</span>
-        </footer>
-      </main>
+      <PolicyNotice
+        kind={policy}
+        onClose={() => {
+          setPolicy("");
+          history.replaceState(null, "", "/");
+        }}
+      />
     );
+  if (link)
+    return (
+      <AuthPanel
+        api={request}
+        intent={link}
+        onCancel={() => setLink(null)}
+        onComplete={refresh}
+      />
+    );
+  if (identity && !identity.email_verified_at && !identity.legacy_access)
+    return (
+      <VerificationGate
+        account={identity}
+        ready={mailReady}
+        api={request}
+        refresh={refresh}
+      />
+    );
+  if (!state) return <AuthPanel api={request} onComplete={refresh} />;
   const table = (items: Message[]) => (
     <div className="table-scroll">
       <table>
@@ -556,6 +731,16 @@ export default function Home() {
   );
   return (
     <div className="app-shell">
+      <a href="#main-content" className="skip-link">
+        Skip to content
+      </a>
+      {mobile && (
+        <button
+          className="nav-overlay"
+          aria-label="Close navigation"
+          onClick={() => setMobile(false)}
+        />
+      )}
       <aside className={"sidebar " + (mobile ? "open" : "")}>
         <a className="brand" href="/">
           {" "}
@@ -567,7 +752,7 @@ export default function Home() {
           </div>
         </a>
         <div className="workspace-label">
-          STUDENT WORKSPACE <span>01</span>
+          RESEARCH WORKSPACE <span>MS</span>
         </div>
         <nav>
           {nav.map(([name, Icon]) => (
@@ -590,7 +775,7 @@ export default function Home() {
         </nav>
         <div className="sidebar-bottom">
           <div className="mock-card">
-            <span className="dot" /> PHASE 1 WORKSPACE
+            <span className="dot" /> YOUR PRIVATE WORKSPACE
             <p>
               Build connections.
               <br />
@@ -634,6 +819,7 @@ export default function Home() {
             <button
               className="mobile-toggle"
               aria-label="Open navigation"
+              aria-expanded={mobile}
               onClick={() => setMobile(!mobile)}
             >
               <Menu size={21} />
@@ -642,6 +828,18 @@ export default function Home() {
             <strong>{view}</strong>
           </div>
           <div className="top-actions">
+            <button
+              className="theme-toggle"
+              aria-label={theme === "dark" ? "Use light mode" : "Use dark mode"}
+              onClick={() => {
+                const next = theme === "dark" ? "light" : "dark";
+                setTheme(next);
+                document.documentElement.dataset.theme = next;
+                localStorage.setItem("workspace-theme", next);
+              }}
+            >
+              {theme === "dark" ? "☀ Light" : "☾ Dark"}
+            </button>
             <span className="sandbox">
               <span className="dot" />
               {state.capabilities.live_email
@@ -661,14 +859,14 @@ export default function Home() {
             </span>
           </div>
         </header>
-        <main className="content">
+        <main className="content" id="main-content">
           {feedback}
           <div className="page-heading">
             <div>
               <div className="eyebrow">YOUR ACADEMIC JOURNEY, ORGANIZED</div>
               <h1>
                 {view === "Overview"
-                  ? `Welcome back${profile.name ? ", " + profile.name.split(" ")[0] : ""}.`
+                  ? `Welcome back${profile.name ? ", " + (identity?.first_name || profile.name.split(" ")[0]) : ""}.`
                   : view}
               </h1>
               <p>
@@ -801,6 +999,87 @@ export default function Home() {
                   </article>
                 ))}
               </section>
+              <section
+                className="stats detail-stats"
+                aria-label="Workspace metrics"
+              >
+                {[
+                  [
+                    "Draft emails",
+                    messages.filter((m) => m.status === "draft").length,
+                  ],
+                  [
+                    "Approved emails",
+                    messages.filter((m) => m.approved).length,
+                  ],
+                  [
+                    "Scheduled emails",
+                    messages.filter((m) => m.status === "pending").length,
+                  ],
+                  ["Failed deliveries", counts.failed],
+                  [
+                    "Follow-ups due",
+                    followups.filter(
+                      (m) => new Date(m.followup_at!) <= new Date(),
+                    ).length,
+                  ],
+                  [
+                    "Connected Gmail",
+                    state.connections.filter(
+                      (c) => c.provider === "gmail" && c.status === "connected",
+                    ).length,
+                  ],
+                  ["AI requests today", state.ai_usage.requests],
+                  ["AI tokens today", state.ai_usage.tokens],
+                ].map(([label, value]) => (
+                  <article className="stat" key={label}>
+                    <div>{label}</div>
+                    <strong>{value}</strong>
+                  </article>
+                ))}
+              </section>
+              <section className="panel activity-panel">
+                <div className="panel-heading">
+                  <h2>Coming up next</h2>
+                  <span className="badge">
+                    {identity?.first_name} {identity?.last_name}
+                  </span>
+                </div>
+                {messages
+                  .filter((m) => m.status === "pending")
+                  .sort((a, b) => a.scheduled_at.localeCompare(b.scheduled_at))
+                  .slice(0, 4)
+                  .map((m) => (
+                    <div className="document-row" key={m.id}>
+                      <CalendarClock size={20} />
+                      <div>
+                        <strong>{m.professor_name}</strong>
+                        <small>{displayDate(m.scheduled_at, m.timezone)}</small>
+                      </div>
+                      <span className="badge pending">Scheduled</span>
+                    </div>
+                  ))}
+                {!messages.some((m) => m.status === "pending") && (
+                  <p className="section-note">
+                    No scheduled actions. Your next conversation can start with
+                    a draft.
+                  </p>
+                )}
+                <div className="panel-heading">
+                  <h3>Recent notifications</h3>
+                </div>
+                {state.notifications.slice(0, 3).map((n) => (
+                  <p className="section-note" key={n.id}>
+                    <strong>{n.kind}: </strong>
+                    {n.message}
+                  </p>
+                ))}
+                {!state.notifications.length && (
+                  <p className="section-note">
+                    All caught up. Account and delivery updates appear here.
+                  </p>
+                )}
+              </section>
               <div className="overview-grid">
                 <section className="panel">
                   <div className="panel-heading">
@@ -889,12 +1168,27 @@ export default function Home() {
                     accept=".csv,.xlsx"
                     onChange={(e) => {
                       const file = e.target.files?.[0];
-                      if (file) act(() => importFile(file), "Import complete");
+                      if (file) act(() => importFile(file), "");
                       e.target.value = "";
                     }}
                   />
                 </label>
               </div>
+              <label className="checkbox-label import-option">
+                <input
+                  type="checkbox"
+                  checked={includeImportDrafts}
+                  onChange={(e) => setIncludeImportDrafts(e.target.checked)}
+                />
+                Also prepare fully specified manual mock drafts (up to 25 rows;
+                requires subject, body, scheduled_at and optional timezone).
+                Review and batch approve separately; never sends on import.
+              </label>
+              <p className="helper">
+                <a href="/professors-email-template.csv" download>
+                  Download professor + email draft template
+                </a>
+              </p>
               <p className="helper">
                 Columns: name, email, university, interests. Up to 500 rows.
                 Duplicate emails are skipped.{" "}
@@ -905,12 +1199,27 @@ export default function Home() {
               <div className="professor-grid">
                 {professors
                   .filter((p) =>
-                    (p.name + p.university + p.interests)
+                    (p.name + p.email + p.university + p.interests)
                       .toLowerCase()
                       .includes(query.toLowerCase()),
                   )
                   .map((p) => (
                     <article className="panel professor-card" key={p.id}>
+                      <button
+                        className="text-link edit-professor"
+                        onClick={() => {
+                          setProfessor({
+                            name: p.name,
+                            email: p.email,
+                            university: p.university,
+                            interests: p.interests,
+                          });
+                          setEditingProfessor(p.id);
+                          setModal("professor");
+                        }}
+                      >
+                        Edit details
+                      </button>
                       <span className="professor-avatar">
                         {p.name
                           .split(" ")
@@ -962,6 +1271,27 @@ export default function Home() {
           )}
           {view === "Outreach" && (
             <section className="panel">
+              <label className="status-filter">
+                Filter status
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value)}
+                >
+                  {[
+                    "all",
+                    "draft",
+                    "pending",
+                    "sent",
+                    "replied",
+                    "failed",
+                    "cancelled",
+                  ].map((value) => (
+                    <option key={value} value={value}>
+                      {value === "all" ? "All statuses" : value}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <div className="panel-heading">
                 <div className="search">
                   <Search size={17} />
@@ -1033,7 +1363,7 @@ export default function Home() {
                           form.set("file", file);
                           if (file.size > 2 * 1024 * 1024)
                             throw new Error("Document limit is 2 MiB.");
-                          await request("/documents", "POST", form);
+                          await uploadPrivate(file);
                         }, "Private document uploaded. New files may take a minute to become downloadable.");
                       e.target.value = "";
                     }}
@@ -1044,6 +1374,15 @@ export default function Home() {
                   student; files expire after 30 days
                 </small>
               </div>
+              {uploadProgress !== null && (
+                <div className="upload-progress" role="status">
+                  <label>
+                    Uploading private document: {uploadProgress}%
+                    <progress max="100" value={uploadProgress} />
+                  </label>
+                  <p>Processing and confirmation follow transfer completion.</p>
+                </div>
+              )}
               <div className="document-list">
                 {state.documents.map((d) => (
                   <div className="document-row" key={d.id}>
@@ -1054,6 +1393,34 @@ export default function Home() {
                       <strong>{d.name}</strong>
                       <small>{(d.size / 1024).toFixed(1)} KB · Private</small>
                     </div>
+                    <button
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() =>
+                        act(async () => {
+                          if (d.name.toLowerCase().endsWith(".txt")) {
+                            const response = await fetch(
+                              `${API}/api/documents/${d.id}`,
+                              { credentials: "include", cache: "no-store" },
+                            );
+                            if (!response.ok)
+                              throw new Error(
+                                "Document is not available yet. Try again shortly.",
+                              );
+                            setDocumentPreview({
+                              name: d.name,
+                              text: (await response.text()).slice(0, 65536),
+                            });
+                          } else
+                            setDocumentPreview({
+                              name: d.name,
+                              text: `Private ${d.name.toLowerCase().endsWith(".pdf") ? "PDF" : "DOCX"} document · ${(d.size / 1024).toFixed(1)} KiB. Download to inspect this file locally. Inline active-document rendering is intentionally unavailable.`,
+                            });
+                        }, "Private preview opened")
+                      }
+                    >
+                      Preview
+                    </button>
                     <a
                       className="secondary"
                       href={`${API}/api/documents/${d.id}`}
@@ -1079,6 +1446,35 @@ export default function Home() {
                   </div>
                 ))}
               </div>
+            </section>
+          )}
+          {view === "Academic profile" && identity && (
+            <section className="panel settings-card identity-summary">
+              <h2>
+                {identity.first_name} {identity.last_name}
+              </h2>
+              <p>
+                Display name:{" "}
+                {identity.display_name || profile.name || "Not set"}
+              </p>
+              <p>{identity.email}</p>
+              <span className="badge">
+                {identity.email_verified_at
+                  ? "Email verified"
+                  : "Email not yet verified · existing account access"}
+              </span>
+              <button className="secondary" onClick={() => setView("Settings")}>
+                Manage identity & security
+              </button>
+              <p>
+                {
+                  state.connections.filter(
+                    (c) => c.provider === "gmail" && c.status === "connected",
+                  ).length
+                }{" "}
+                connected Gmail accounts · {state.documents.length} private
+                documents
+              </p>
             </section>
           )}
           {view === "Academic profile" && (
@@ -1211,6 +1607,13 @@ export default function Home() {
           )}
           {view === "Settings" && (
             <div className="settings-grid">
+              {identity && (
+                <AccountSettings
+                  account={identity}
+                  api={request}
+                  refresh={refresh}
+                />
+              )}
               <section className="panel settings-card">
                 <h2>Email connections</h2>
                 <p>
@@ -1458,6 +1861,27 @@ export default function Home() {
           <option key={t}>{t}</option>
         ))}
       </datalist>
+      {documentPreview && (
+        <div className="modal-backdrop">
+          <section
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="preview-title"
+          >
+            <div className="modal-heading">
+              <h2 id="preview-title">{documentPreview.name}</h2>
+              <button
+                aria-label="Close document preview"
+                onClick={() => setDocumentPreview(null)}
+              >
+                <X size={21} />
+              </button>
+            </div>
+            <pre className="email-preview">{documentPreview.text}</pre>
+          </section>
+        </div>
+      )}
       {(modal || review) && (
         <div className="modal-backdrop">
           <section
@@ -1473,7 +1897,9 @@ export default function Home() {
                   {review
                     ? "Review outreach"
                     : modal === "professor"
-                      ? "Add a professor"
+                      ? editingProfessor
+                        ? "Edit professor"
+                        : "Add a professor"
                       : "Compose outreach"}
                 </h2>
               </div>
@@ -1482,6 +1908,7 @@ export default function Home() {
                 onClick={() => {
                   setModal(null);
                   setReview(null);
+                  setEditingProfessor("");
                 }}
               >
                 <X size={21} />
@@ -1540,7 +1967,14 @@ export default function Home() {
                 onSubmit={(e: FormEvent) => {
                   e.preventDefault();
                   act(async () => {
-                    await request("/professors", "POST", [professor]);
+                    await request(
+                      editingProfessor
+                        ? `/professors/${editingProfessor}`
+                        : "/professors",
+                      editingProfessor ? "PUT" : "POST",
+                      editingProfessor ? professor : [professor],
+                    );
+                    setEditingProfessor("");
                     setProfessor({
                       name: "",
                       email: "",
@@ -1569,7 +2003,8 @@ export default function Home() {
                   ),
                 )}
                 <button className="primary" disabled={busy}>
-                  Add professor <Plus size={16} />
+                  {editingProfessor ? "Save professor" : "Add professor"}{" "}
+                  <Plus size={16} />
                 </button>
               </form>
             )}
@@ -1682,6 +2117,56 @@ export default function Home() {
                     </option>
                   </select>
                 </label>
+                <div className="form-grid">
+                  <label>
+                    Writing tone
+                    <select
+                      value={tone}
+                      onChange={(e) => setTone(e.target.value)}
+                    >
+                      <option value="professional">Professional</option>
+                      <option value="concise">Concise</option>
+                      <option value="warm">Warm & respectful</option>
+                    </select>
+                  </label>
+                  <label>
+                    Reusable template
+                    <select
+                      value={template}
+                      onChange={(e) => setTemplate(e.target.value)}
+                    >
+                      <option value="0">Research introduction</option>
+                      <option value="1">MS availability</option>
+                      <option value="2">Research discussion</option>
+                    </select>
+                  </label>
+                </div>
+                {draft.mode === "manual" && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={busy || !draft.professor_id}
+                    onClick={() =>
+                      act(async () => {
+                        const result = await request("/draft", "POST", {
+                          professor_id: draft.professor_id,
+                          template: Number(template),
+                          tone,
+                          manual_template: true,
+                        });
+                        setDraft({
+                          ...draft,
+                          subject: result.subject,
+                          body: result.body,
+                          authorized: false,
+                          followup_authorized: false,
+                        });
+                      }, "Editable template prepared")
+                    }
+                  >
+                    Use selected template
+                  </button>
+                )}
                 {draft.mode !== "manual" && (
                   <button
                     type="button"

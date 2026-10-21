@@ -10,6 +10,9 @@
     "LIVE_EMAIL_ENABLED": "false",
     "AI_PROVIDER": "mock",
     "GROQ_FREE_PLAN_CONFIRMED": "false",
+    "MAIL_PROVIDER": "disabled",
+    "MAIL_DELIVERY_ENABLED": "false",
+    "MAIL_FREE_PLAN_CONFIRMED": "false",
   },
   "d1_databases": [
     {
