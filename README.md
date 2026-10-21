@@ -70,3 +70,5 @@ The repository `Malang43/MS-Professor-Agent` is private. Never make it public, f
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module boundaries, transaction/consistency design, provider limitations and existing production-hardening gaps. Password recovery, email verification/MFA, full malware scanning, universal bounce/opt-out classification and live provider certification remain outside this readiness claim. Google verification and eligible Microsoft registration may block public integrations; do not bypass them or sign up for a card-based trial.
 
 Local smoke: start Wrangler with --persist-to .wrangler/studio-readiness and set SMOKE_D1_PERSIST_PATH to that absolute directory, plus SMOKE_API_URL=http://localhost:8792/api when using port 8792. The smoke script never targets production.
+
+Current production verification and remaining owner setup: [STUDIO-PRODUCTION-STATUS.md](docs/STUDIO-PRODUCTION-STATUS.md).
