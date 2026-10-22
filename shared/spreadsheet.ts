@@ -41,7 +41,7 @@ export function spreadsheetDraft(
     );
   if (new Date(date).toISOString().slice(0, 19) !== date.slice(0, 19))
     fail("invalid calendar date.");
-  const timezone = row.timezone?.trim() || "UTC";
+  const timezone = row.timezone?.trim() || "Asia/Karachi";
   try {
     new Intl.DateTimeFormat("en", { timeZone: timezone });
   } catch {

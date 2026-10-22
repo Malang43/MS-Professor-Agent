@@ -2,11 +2,15 @@
 
 Prepared 2026-10-21 for private repository `Malang43/MS-Professor-Agent`. The mock-default application was deployed with explicit authorization on 2026-10-21. See [the production deployment report](docs/DEPLOYMENT-STATUS.md) for live URLs, resource IDs, verification results, and remaining tasks. Default production uses **Vercel Hobby + Workers Free + D1 Free + Workers KV Free**. No card, trial, paid upgrade, R2 subscription, purchased domain or real professor outreach is authorized. If an account/setup step requires payment details or an ineligible plan, stop that step and report it. No unlimited free usage is promised.
 
+## Real Gmail activation
+
+The current owner has authorized restricted live activation for `raza1206896@gmail.com` and `muslim1206896@gmail.com`, with no email sent before approval of its exact content in the app. See [LIVE-GMAIL-ACTIVATION.md](docs/LIVE-GMAIL-ACTIVATION.md) for the current release and final steps. Normal production disables mock dispatch and simulation controls. Historical mock receipts never become real sends. Professor outreach requires the separate owner-only activation button after successful controlled deliveries and a detected reply. Preserve existing Groq configuration, Gmail credentials and production data. Earlier release reports below record their historical disabled-live state and do not override this release.
+
 ## Excel-to-Gmail automation verification
 
-See [EXCEL-GMAIL-VERIFICATION.md](docs/EXCEL-GMAIL-VERIFICATION.md) for the full Excel template, atomic import and retry behavior, inactive follow-up proposals, configurable 1-30 day delays (including 3), final reply checks, mailbox limits, verification and live-test boundaries. Live delivery remains disabled.
+See [EXCEL-GMAIL-VERIFICATION.md](docs/EXCEL-GMAIL-VERIFICATION.md) for the full Excel template, atomic import and retry behavior, inactive follow-up proposals, configurable 1-30 day delays (including 3), final reply checks, mailbox limits, verification and live-test boundaries. That report describes the earlier disabled-live release; the current restricted-live release is documented above.
 
-## Current production release
+## Previous Research Studio production release
 
 The Research Studio/account-security release is deployed and verified. See [STUDIO-PRODUCTION-STATUS.md](docs/STUDIO-PRODUCTION-STATUS.md) for actual Worker/Vercel revisions, checks and owner-dependent blockers. Live outreach remains disabled; the owner's existing Groq configuration is preserved. Transactional verification/reset delivery is not yet configured.
 
@@ -14,7 +18,7 @@ The Research Studio/account-security release is deployed and verified. See [STUD
 
 See [STUDIO-RELEASE.md](docs/STUDIO-RELEASE.md) for the additive 0003 account-security migration, identity/verification/recovery/deletion behavior, responsive light/dark UI, validation and owner setup. Existing accounts retain legacy access; new accounts are gated until genuine email verification. Transactional delivery is unconfigured and must not be claimed operational. The current owner production Groq configuration is enabled and must be preserved during release, alongside Gmail credentials, encryption key, administrator quota allowlist and LIVE_EMAIL_ENABLED=false. Source defaults remain mocked/disabled for new deployments. No migration deletes existing production data or resets quotas.
 
-## Current readiness
+## Historical readiness before live activation
 
 For the October 21 live quota, Gmail and stopped-outreach investigation, see [PRODUCTION-DIAGNOSIS.md](docs/PRODUCTION-DIAGNOSIS.md). The normal OAuth allowance is 5 starts per UTC day; the designated server-allowlisted test account retains 15, with a shared global cap of 50. Gmail and Outlook share the budget and failed/cancelled starts count. The observed October 21 allowance resets October 22 at 05:00 AM Asia/Karachi. The quota reporting fix was approved for commit, push and Worker deployment on October 21; limits and existing credentials must remain unchanged.
 
@@ -111,7 +115,7 @@ PDF active-content markers and unsafe DOCX containers are conservatively rejecte
 
 KV currently includes finite Free allowances (including 1 GB storage and limited daily operations), with 25 MiB maximum values. App budgets are smaller, but account workloads share provider quotas. Check current limits; exhausted quotas fail/back off, never silently upgrade.
 
-## Deployment order: future approval required
+## Deployment order for a fresh installation
 
 1. Review code/commit and no-card plan eligibility. Check Git auto-deploy hooks **before pushing**.
 2. Approve Wrangler sign-in; select intended account and Workers Free. Never use a temporary preview account to bypass authorization.

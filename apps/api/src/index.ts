@@ -1,4 +1,13 @@
 import { z } from "zod";
+import { approveGmail, retryGmail } from "./live-approval";
+import {
+  isLiveOwner,
+  productionEnabled,
+  activationEvidence,
+  changeProductionMode,
+  checkGmail,
+  testRecipients,
+} from "./live-controls";
 import { spreadsheetDraft } from "../../../shared/spreadsheet";
 import {
   accountPublic,
@@ -127,6 +136,7 @@ async function owned(
   return row;
 }
 export async function runJobs(env: Env, user?: string) {
+  if (env.MOCK_DELIVERY_ENABLED === "false") return;
   // The mock delivery and status transition share one atomic SQL transaction.
   // A UNIQUE message_id is the idempotency boundary, even across overlapping ticks.
   await env.DB.batch([
@@ -151,7 +161,12 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (path === "/api/health")
     return json({
       ok: true,
-      provider: "mock",
+      provider: env.MOCK_DELIVERY_ENABLED === "false" ? "gmail" : "mock",
+      gmail_ready: !!(await env.DB.prepare(
+        "SELECT 1 ok FROM mailbox_checks k JOIN connections c ON c.id=k.connection_id WHERE k.status='ready' AND c.status='connected' AND k.checked_at>? LIMIT 1",
+      )
+        .bind(Date.now() - 3600000)
+        .first()),
       storage: "kv",
       live_email: liveEnabled(env),
     });
@@ -181,6 +196,18 @@ async function route(req: Request, env: Env): Promise<Response> {
   const privateAccount = await accountPrivate(req, env, user);
   if (privateAccount) return privateAccount;
   await requireVerified(env, user);
+  if (path === "/api/outreach/mode" && method === "POST") {
+    const input = z
+      .object({ production_enabled: z.boolean(), confirmed: z.literal(true) })
+      .parse(await req.json());
+    await changeProductionMode(env, user, input.production_enabled);
+    return json({ ok: true });
+  }
+  const retry = path.match(/^\/api\/messages\/([^/]+)\/retry$/);
+  if (retry && method === "POST") {
+    z.object({ confirmed: z.literal(true) }).parse(await req.json());
+    return retryGmail(env, user, retry[1]);
+  }
   const connectionStart = path.match(
     /^\/api\/connections\/(gmail|outlook)\/start$/,
   );
@@ -282,7 +309,7 @@ async function route(req: Request, env: Env): Promise<Response> {
           .bind(user, Date.now())
           .all(),
         env.DB.prepare(
-          "SELECT m.*,p.name professor_name,COALESCE(CASE WHEN json_valid(t.snapshot) THEN json_extract(t.snapshot,'$.recipient') END,p.email) professor_email FROM messages m JOIN professors p ON p.id=m.professor_id LEFT JOIN transports t ON t.message_id=m.id WHERE m.user_id=? ORDER BY m.created_at DESC",
+          "SELECT m.*,p.name professor_name,COALESCE(CASE WHEN json_valid(t.snapshot) THEN json_extract(t.snapshot,'$.recipient') END,m.approved_recipient,p.email) professor_email FROM messages m JOIN professors p ON p.id=m.professor_id LEFT JOIN transports t ON t.message_id=m.id WHERE m.user_id=? ORDER BY m.created_at DESC",
         )
           .bind(user)
           .all(),
@@ -324,7 +351,12 @@ async function route(req: Request, env: Env): Promise<Response> {
       capabilities: {
         gmail: oauthAvailable(env, "gmail"),
         outlook: oauthAvailable(env, "outlook"),
-        live_email: liveEnabled(env),
+        live_email: liveEnabled(env) && isLiveOwner(env, user),
+        mock_delivery: env.MOCK_DELIVERY_ENABLED !== "false",
+        live_owner: !!env.LIVE_OWNER_USER_IDS?.trim() && isLiveOwner(env, user),
+        production_outreach: await productionEnabled(env, user),
+        test_recipients: testRecipients(env),
+        activation: await activationEvidence(env, user),
         ai:
           env.AI_PROVIDER === "groq" &&
           env.GROQ_API_KEY &&
@@ -349,7 +381,21 @@ async function route(req: Request, env: Env): Promise<Response> {
       ).results,
       transports: (
         await env.DB.prepare(
-          "SELECT message_id,connection_id,state,provider_id,thread_id FROM transports WHERE user_id=?",
+          "SELECT message_id,connection_id,state,provider_id,thread_id,attempts,next_at FROM transports WHERE user_id=?",
+        )
+          .bind(user)
+          .all()
+      ).results,
+      mailbox_checks: (
+        await env.DB.prepare(
+          "SELECT k.* FROM mailbox_checks k JOIN connections c ON c.id=k.connection_id WHERE c.user_id=?",
+        )
+          .bind(user)
+          .all()
+      ).results,
+      delivery_attempts: (
+        await env.DB.prepare(
+          "SELECT a.* FROM delivery_attempts a JOIN messages m ON m.id=a.message_id WHERE m.user_id=? ORDER BY a.started_at DESC LIMIT 100",
         )
           .bind(user)
           .all()
@@ -550,8 +596,8 @@ async function route(req: Request, env: Env): Promise<Response> {
         ON CONFLICT(user_id,email) DO NOTHING`,
       ).bind(user, payload),
       env.DB.prepare(
-        `INSERT INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone,followup_proposal,import_key)
-        SELECT json_extract(j.value,'$.id'),?,p.id,json_extract(j.value,'$.subject'),json_extract(j.value,'$.body'),'manual',0,0,'draft',json_extract(j.value,'$.scheduled_at'),json_extract(j.value,'$.timezone'),json_extract(j.value,'$.followup_proposal'),json_extract(j.value,'$.import_key')
+        `INSERT INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone,followup_proposal,import_key,approved_recipient)
+        SELECT json_extract(j.value,'$.id'),?,p.id,json_extract(j.value,'$.subject'),json_extract(j.value,'$.body'),'manual',0,0,'draft',json_extract(j.value,'$.scheduled_at'),json_extract(j.value,'$.timezone'),json_extract(j.value,'$.followup_proposal'),json_extract(j.value,'$.import_key'),json_extract(j.value,'$.email')
         FROM json_each(?) j JOIN professors p ON p.user_id=? AND p.email=json_extract(j.value,'$.email')
         WHERE NOT EXISTS(SELECT 1 FROM messages m WHERE m.user_id=p.user_id AND m.professor_id=p.id AND m.subject=json_extract(j.value,'$.subject') AND m.body=json_extract(j.value,'$.body') AND m.scheduled_at=json_extract(j.value,'$.scheduled_at'))
         ON CONFLICT(user_id,import_key) WHERE import_key IS NOT NULL DO NOTHING`,
@@ -563,6 +609,11 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
   if (path === "/api/messages" && method === "POST") {
     const m = messageSchema.parse(await req.json());
+    if (env.MOCK_DELIVERY_ENABLED === "false" && m.mode === "auto")
+      throw new HttpError(
+        400,
+        "Save the draft, then approve its exact content in Review before scheduling.",
+      );
     const recipient = await owned(env, "professors", m.professor_id, user);
     for (const attachment of m.attachments)
       await readyDocument(env, user, attachment);
@@ -601,7 +652,7 @@ async function route(req: Request, env: Env): Promise<Response> {
     }
     await env.DB.batch([
       env.DB.prepare(
-        "INSERT INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone,live_ready,approved_recipient) VALUES(?,?,?,?,?,?,?,?,?,?,?,1,?)",
       ).bind(
         messageId,
         user,
@@ -614,6 +665,7 @@ async function route(req: Request, env: Env): Promise<Response> {
         queued ? "pending" : "draft",
         m.scheduled_at,
         m.timezone,
+        String(recipient.email),
       ),
       ...(snapshot
         ? [
@@ -654,6 +706,8 @@ async function route(req: Request, env: Env): Promise<Response> {
     return json({ id: messageId });
   }
   if (path === "/api/messages/approve" && method === "POST") {
+    if (env.MOCK_DELIVERY_ENABLED === "false")
+      return approveGmail(env, user, await req.json());
     const { ids } = z
       .object({ ids: z.array(z.string().uuid()).min(1).max(500) })
       .parse(await req.json());
@@ -711,6 +765,8 @@ async function route(req: Request, env: Env): Promise<Response> {
     /^\/api\/messages\/([^/]+)\/simulate-failure$/,
   );
   if (failureMatch && method === "POST") {
+    if (env.MOCK_DELIVERY_ENABLED === "false")
+      throw new HttpError(404, "Not found");
     await owned(env, "messages", failureMatch[1], user);
     await env.DB.batch([
       env.DB.prepare(
@@ -758,6 +814,8 @@ async function route(req: Request, env: Env): Promise<Response> {
     return json({ ok: true });
   }
   if (path === "/api/jobs/run" && method === "POST") {
+    if (env.MOCK_DELIVERY_ENABLED === "false")
+      throw new HttpError(404, "Not found");
     await runJobs(env, user);
     return json({ ok: true });
   }
@@ -907,6 +965,7 @@ export default {
       await queueFollowups(env);
     } else if (phase === 1) await runLiveJobs(env);
     else {
+      await checkGmail(env);
       await cleanDocuments(env);
       await cleanDeletedAccounts(env);
       await env.DB.prepare(

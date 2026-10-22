@@ -12,6 +12,8 @@ export type Envelope = {
   subject: string;
   body: string;
   messageKey: string;
+  threadId?: string;
+  inReplyTo?: string;
   attachments: Attachment[];
 };
 export type Receipt = { id: string | null; threadId: string | null };
@@ -39,7 +41,7 @@ export async function providerRequest(
 ): Promise<any> {
   let response: Response;
   try {
-    response = await network(url, {
+    response = await network.call(globalThis, url, {
       ...init,
       signal: AbortSignal.timeout(15000),
       redirect: "manual",
@@ -245,6 +247,12 @@ export function mime(envelope: Envelope) {
     `To: ${cleanHeader(envelope.recipient)}`,
     `Subject: ${encodedSubject(envelope.subject)}`,
     `Message-ID: <${cleanHeader(envelope.messageKey)}>`,
+    ...(envelope.inReplyTo
+      ? [
+          `In-Reply-To: <${cleanHeader(envelope.inReplyTo)}>`,
+          `References: <${cleanHeader(envelope.inReplyTo)}>`,
+        ]
+      : []),
     "MIME-Version: 1.0",
     `Content-Type: multipart/mixed; boundary="${boundary}"`,
     "",
@@ -310,6 +318,7 @@ export function emailProvider(
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               raw: base64url(new TextEncoder().encode(mime(envelope))),
+              ...(envelope.threadId ? { threadId: envelope.threadId } : {}),
             }),
           },
           true,

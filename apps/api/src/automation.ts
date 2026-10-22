@@ -1,5 +1,6 @@
 import { type Env, HttpError, consume, notify, random, hash } from "./runtime";
 import { accessToken, oauthAvailable } from "./oauth";
+import { isLiveOwner, productionEnabled } from "./live-controls";
 import {
   emailProvider,
   ProviderError,
@@ -16,13 +17,18 @@ export function liveEnabled(env: Env) {
     !!env.LIVE_TEST_RECIPIENTS?.trim()
   );
 }
-export function allowedRecipient(env: Env, address: string) {
+export async function allowedRecipient(
+  env: Env,
+  address: string,
+  user?: string,
+) {
+  if (!liveEnabled(env) || (user && !isLiveOwner(env, user))) return false;
   return (
-    liveEnabled(env) &&
     (env.LIVE_TEST_RECIPIENTS || "")
       .split(",")
       .map((v) => v.trim().toLowerCase())
-      .includes(address.toLowerCase())
+      .includes(address.toLowerCase()) ||
+    (!!user && (await productionEnabled(env, user)))
   );
 }
 export type Snapshot = {
@@ -37,6 +43,8 @@ export type Snapshot = {
     content_type: string;
   }[];
   key: string;
+  threadId?: string;
+  inReplyTo?: string;
 };
 export async function transportSnapshot(
   env: Env,
@@ -48,7 +56,7 @@ export async function transportSnapshot(
   attachments: string[],
   messageId: string,
 ) {
-  if (!allowedRecipient(env, recipient))
+  if (!(await allowedRecipient(env, recipient, user)))
     throw new HttpError(
       403,
       "Live sending is disabled or this controlled test recipient is not authorized.",
@@ -59,6 +67,8 @@ export async function transportSnapshot(
     .bind(connectionId, user)
     .first<any>();
   if (!connection) throw new HttpError(404, "Sending account not found");
+  if (connection.provider === "gmail" && !/gmail.send/.test(connection.scopes))
+    throw new HttpError(409, "Reconnect Gmail with sending permission.");
   if (
     connection.provider === "outlook" &&
     !/\bMail.Read\b/.test(connection.scopes)
@@ -101,6 +111,9 @@ async function receipt(env: Env, row: any, result: Receipt) {
     env.DB.prepare(
       "INSERT OR IGNORE INTO deliveries(message_id,provider,provider_id) VALUES(?,?,?)",
     ).bind(row.message_id, row.provider, row.connection_id + ":" + result.id),
+    env.DB.prepare(
+      "UPDATE delivery_attempts SET outcome='accepted' WHERE message_id=? AND attempt=(SELECT attempts FROM transports WHERE message_id=?)",
+    ).bind(row.message_id, row.message_id),
     env.DB.prepare(
       "UPDATE transports SET state='confirmed',provider_id=?,thread_id=?,lease=NULL,lease_until=0,next_sync=? WHERE message_id=?",
     ).bind(result.id, result.threadId, Date.now() + 300000, row.message_id),
@@ -151,13 +164,16 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
     .bind(now)
     .run();
   const rows = await env.DB.prepare(
-    `SELECT t.*,c.provider,c.address,c.subject AS account_subject,c.status AS account_status,c.scopes,c.tokens,c.expires_at,c.refresh_until,c.refresh_lease,m.status AS message_status,m.parent_id FROM transports t JOIN messages m ON m.id=t.message_id JOIN connections c ON c.id=t.connection_id JOIN profiles p ON p.user_id=t.user_id WHERE t.state IN ('waiting','uncertain') AND t.next_at<=? AND ((t.state='uncertain') OR (?=1 AND m.status='pending' AND m.approved=1 AND (m.mode!='auto' OR m.authorized=1) AND m.scheduled_at<=? AND p.paused=0 AND p.stopped=0)) ORDER BY t.next_at,t.message_id LIMIT 1`,
+    `SELECT t.*,c.provider,c.address,c.subject AS account_subject,c.status AS account_status,c.scopes,c.tokens,c.expires_at,c.refresh_until,c.refresh_lease,m.status AS message_status,m.parent_id FROM transports t JOIN messages m ON m.id=t.message_id JOIN connections c ON c.id=t.connection_id JOIN profiles p ON p.user_id=t.user_id WHERE t.state IN ('waiting','uncertain') AND t.next_at<=? AND ((t.state='uncertain') OR (?=1 AND m.status='pending' AND m.live_ready=1 AND m.approved=1 AND (m.mode!='auto' OR m.authorized=1) AND m.scheduled_at<=? AND p.paused=0 AND p.stopped=0)) ORDER BY t.next_at,t.message_id LIMIT 1`,
   )
     .bind(now, +maySend, new Date().toISOString())
     .all<any>();
   for (const row of rows.results) {
     const snapshot = JSON.parse(row.snapshot) as Snapshot;
-    if (row.state !== "uncertain" && !allowedRecipient(env, snapshot.recipient))
+    if (
+      row.state !== "uncertain" &&
+      !(await allowedRecipient(env, snapshot.recipient, row.user_id))
+    )
       continue;
     if (!oauthAvailable(env, row.provider)) continue;
     if (row.account_status !== "connected") {
@@ -233,7 +249,7 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
       await fail(env, row, "suppressed");
       continue;
     }
-    if (row.attempts >= 3) {
+    if (row.attempts >= row.max_attempts) {
       await fail(env, row, "failed");
       continue;
     }
@@ -282,7 +298,7 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
       }
       // Last D1 fence before the external side effect; do not trust stale approval/account state.
       const fenced = await env.DB.prepare(
-        `UPDATE transports SET state='submitting',attempts=attempts+1 WHERE message_id=? AND lease=? AND state='leased' AND EXISTS(SELECT 1 FROM messages m JOIN profiles p ON p.user_id=m.user_id JOIN connections c ON c.id=? WHERE m.id=? AND m.status='pending' AND m.approved=1 AND (m.mode!='auto' OR m.authorized=1) AND p.paused=0 AND p.stopped=0 AND c.status='connected') AND NOT EXISTS(SELECT 1 FROM suppressions WHERE user_id=? AND address=?) RETURNING message_id`,
+        `UPDATE transports SET state='submitting',attempts=attempts+1 WHERE message_id=? AND lease=? AND state='leased' AND EXISTS(SELECT 1 FROM messages m JOIN profiles p ON p.user_id=m.user_id JOIN connections c ON c.id=? WHERE m.id=? AND m.status='pending' AND m.live_ready=1 AND m.approved=1 AND (m.mode!='auto' OR m.authorized=1) AND p.paused=0 AND p.stopped=0 AND c.status='connected') AND NOT EXISTS(SELECT 1 FROM suppressions WHERE user_id=? AND address=?) RETURNING message_id`,
       )
         .bind(
           row.message_id,
@@ -301,6 +317,11 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
           .run();
         continue;
       }
+      await env.DB.prepare(
+        "INSERT INTO delivery_attempts(id,message_id,attempt,started_at,outcome) SELECT ?,message_id,attempts,?,'submitting' FROM transports WHERE message_id=?",
+      )
+        .bind(crypto.randomUUID(), Date.now(), row.message_id)
+        .run();
       submitted = true;
       const result = await provider.send(token, {
         ...snapshot,
@@ -323,6 +344,20 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
         );
       }
     } catch (error) {
+      await env.DB.prepare(
+        "UPDATE delivery_attempts SET outcome=? WHERE message_id=? AND attempt=(SELECT attempts FROM transports WHERE message_id=?)",
+      )
+        .bind(
+          submitted &&
+            (!(error instanceof ProviderError) || error.kind === "uncertain")
+            ? "uncertain"
+            : error instanceof ProviderError
+              ? error.kind
+              : "failed_before_send",
+          row.message_id,
+          row.message_id,
+        )
+        .run();
       if (
         submitted &&
         (!(error instanceof ProviderError) || error.kind === "uncertain")
@@ -523,12 +558,12 @@ export async function syncReplies(
 export async function queueFollowups(env: Env) {
   if (!liveEnabled(env)) return;
   const rows = await env.DB.prepare(
-    `SELECT a.*,m.user_id,m.professor_id,m.timezone,m.sent_at,t.connection_id,t.snapshot,c.status AS account_status,c.scopes FROM automation a JOIN messages m ON m.id=a.message_id JOIN transports t ON t.message_id=m.id JOIN connections c ON c.id=t.connection_id JOIN profiles p ON p.user_id=m.user_id WHERE a.generated=0 AND m.parent_id IS NULL AND m.status='sent' AND p.paused=0 AND p.stopped=0 AND c.status='connected' AND t.sync_checked_at>unixepoch()*1000-60000 AND t.sync_cursor IS NULL AND julianday(m.sent_at)+a.days<=julianday('now') LIMIT 1`,
+    `SELECT a.*,m.user_id,m.professor_id,m.timezone,m.sent_at,t.connection_id,t.thread_id,t.snapshot,c.status AS account_status,c.scopes FROM automation a JOIN messages m ON m.id=a.message_id JOIN transports t ON t.message_id=m.id JOIN connections c ON c.id=t.connection_id JOIN profiles p ON p.user_id=m.user_id WHERE a.generated=0 AND m.live_ready=1 AND m.parent_id IS NULL AND m.status='sent' AND p.paused=0 AND p.stopped=0 AND c.status='connected' AND t.sync_checked_at>unixepoch()*1000-60000 AND t.sync_cursor IS NULL AND julianday(m.sent_at)+a.days<=julianday('now') LIMIT 1`,
   ).all<any>();
   for (const row of rows.results) {
     const snapshot = JSON.parse(row.snapshot) as Snapshot;
     if (
-      !allowedRecipient(env, snapshot.recipient) ||
+      !(await allowedRecipient(env, snapshot.recipient, row.user_id)) ||
       !/gmail.readonly|Mail.Read/.test(row.scopes)
     )
       continue;
@@ -563,11 +598,13 @@ export async function queueFollowups(env: Env) {
         subject: row.subject,
         body: row.body,
         key: id + "@ms-professor-agent.invalid",
+        threadId: row.thread_id,
+        inReplyTo: snapshot.key,
       };
     try {
       await env.DB.batch([
         env.DB.prepare(
-          `INSERT OR IGNORE INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone,parent_id) SELECT ?,?,?,?,?,'auto',1,1,'pending',?,?,? WHERE EXISTS(SELECT 1 FROM messages m JOIN automation a ON a.message_id=m.id JOIN connections c ON c.id=? WHERE m.id=? AND m.status='sent' AND a.generated=0 AND c.status='connected') AND NOT EXISTS(SELECT 1 FROM suppressions WHERE user_id=? AND address=?)`,
+          `INSERT OR IGNORE INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone,parent_id,live_ready) SELECT ?,?,?,?,?,'auto',1,1,'pending',?,?,?,1 WHERE EXISTS(SELECT 1 FROM messages m JOIN automation a ON a.message_id=m.id JOIN connections c ON c.id=? WHERE m.id=? AND m.status='sent' AND a.generated=0 AND c.status='connected') AND NOT EXISTS(SELECT 1 FROM suppressions WHERE user_id=? AND address=?)`,
         ).bind(
           id,
           row.user_id,

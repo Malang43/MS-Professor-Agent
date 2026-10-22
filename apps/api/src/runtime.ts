@@ -11,6 +11,8 @@ export interface Env {
   OAUTH_ENABLED?: string;
   OAUTH_ADMIN_TEST_USER_IDS?: string; // Server-only account IDs; OAuth start budget only.
   LIVE_EMAIL_ENABLED?: string;
+  LIVE_OWNER_USER_IDS?: string;
+  MOCK_DELIVERY_ENABLED?: string;
   LIVE_TEST_RECIPIENTS?: string;
   TOKEN_ENCRYPTION_KEY?: string;
   GMAIL_CLIENT_ID?: string;

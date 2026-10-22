@@ -78,9 +78,12 @@ type Message = {
   mode: string;
   status: string;
   approved?: number;
+  live_ready?: number;
+  parent_id?: string | null;
   scheduled_at: string;
   timezone: string;
   followup_at: string | null;
+  sent_at?: string | null;
   followup_proposal?: string | null;
   attachments: string[];
   error: string | null;
@@ -102,6 +105,15 @@ type State = {
     gmail: boolean;
     outlook: boolean;
     live_email: boolean;
+    mock_delivery: boolean;
+    live_owner: boolean;
+    production_outreach: boolean;
+    test_recipients: string[];
+    activation: {
+      delivered: boolean;
+      reply_detected: boolean;
+      can_activate: boolean;
+    };
     ai: string;
   };
   notifications: { id: string; kind: string; message: string; read: number }[];
@@ -118,6 +130,21 @@ type State = {
     state: string;
     provider_id: string | null;
     thread_id: string | null;
+    attempts: number;
+    next_at: number;
+  }[];
+  mailbox_checks: {
+    connection_id: string;
+    checked_at: number;
+    status: string;
+    detail: string;
+  }[];
+  delivery_attempts: {
+    id: string;
+    message_id: string;
+    attempt: number;
+    started_at: number;
+    outcome: string;
   }[];
   ai_usage: { requests: number; tokens: number };
   audit: Audit[];
@@ -182,6 +209,12 @@ export default function Home() {
     ),
     [review, setReview] = useState<Message | null>(null),
     [selected, setSelected] = useState<string[]>([]);
+  const [approvalAccount, setApprovalAccount] = useState("");
+  const [authorizeImportedFollowups, setAuthorizeImportedFollowups] =
+    useState(false);
+  useEffect(() => {
+    setAuthorizeImportedFollowups(false);
+  }, [selected.join(","), review?.id, approvalAccount]);
   const [tone, setTone] = useState("professional"),
     [template, setTemplate] = useState("0"),
     [uploadProgress, setUploadProgress] = useState<number | null>(null),
@@ -358,6 +391,34 @@ export default function Home() {
   useEffect(() => {
     refresh().catch((e) => setError(e.message));
   }, []);
+  useEffect(() => {
+    if (!state || state.capabilities.mock_delivery || busy) return;
+    const poll = () => {
+      if (document.visibilityState !== "visible") return;
+      request("/state")
+        .then((data) => {
+          setState(data);
+          setReview((current) =>
+            current
+              ? data.messages.find((m: Message) => m.id === current.id) ||
+                current
+              : null,
+          );
+        })
+        .catch((e) => {
+          if (e.message === "Unauthorized") {
+            setState(null);
+            setIdentity(null);
+          }
+        });
+    };
+    const timer = window.setInterval(poll, 30000);
+    window.addEventListener("focus", poll);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", poll);
+    };
+  }, [state?.account.email, state?.capabilities.mock_delivery, busy]);
   async function act(fn: () => Promise<void>, message = "Saved successfully") {
     setBusy(true);
     setError("");
@@ -416,7 +477,10 @@ export default function Home() {
     }
     if (!rows.length || rows.length > 500)
       throw new Error("Import between 1 and 500 professors");
-    if (includeImportDrafts) {
+    if (
+      includeImportDrafts ||
+      rows.some((r) => r.subject || r.body || r.scheduled_at)
+    ) {
       if (rows.length > 25)
         throw new Error(
           "Import at most 25 fully specified draft emails at once. Professor-only imports still support 500 rows.",
@@ -424,7 +488,7 @@ export default function Home() {
       rows.forEach((row, i) => spreadsheetDraft(row, i));
       const result = await request("/imports/drafts", "POST", rows);
       setNotice(
-        `${result.created} manual mock drafts prepared; ${result.skipped} matching drafts skipped. Follow-up proposals remain inactive. Review and approve separately. Nothing was sent.`,
+        `${result.created} drafts prepared; ${result.skipped} matching drafts skipped. Review recipients, choose Gmail, and approve separately. Follow-up proposals remain inactive until authorized.`,
       );
       return;
     }
@@ -456,8 +520,24 @@ export default function Home() {
     (m) => m.followup_at && m.status === "sent",
   );
   const counts = {
-    sent: messages.filter((m) => ["sent", "replied"].includes(m.status)).length,
-    replied: messages.filter((m) => m.status === "replied").length,
+    sent: messages.filter(
+      (m) =>
+        ["sent", "replied"].includes(m.status) &&
+        (state?.capabilities.mock_delivery !== false ||
+          state.transports.some(
+            (t) =>
+              t.message_id === m.id && t.state === "confirmed" && t.provider_id,
+          )),
+    ).length,
+    replied: messages.filter(
+      (m) =>
+        m.status === "replied" &&
+        (state?.capabilities.mock_delivery !== false ||
+          state.transports.some(
+            (t) =>
+              t.message_id === m.id && t.state === "confirmed" && t.provider_id,
+          )),
+    ).length,
     pending: messages.filter((m) => ["draft", "pending"].includes(m.status))
       .length,
     failed: messages.filter((m) => m.status === "failed").length,
@@ -526,6 +606,104 @@ export default function Home() {
       />
     );
   if (!state) return <AuthPanel api={request} onComplete={refresh} />;
+  const realWorkflow = !state.capabilities.mock_delivery;
+  const gmailAccount =
+    approvalAccount ||
+    state.connections.find(
+      (c) => c.provider === "gmail" && c.status === "connected",
+    )?.id ||
+    "";
+  const approvalOptions = () =>
+    realWorkflow
+      ? {
+          sending_account_id: gmailAccount,
+          authorize_followups: authorizeImportedFollowups,
+        }
+      : {};
+  const approvalControls = (items: Message[]) =>
+    realWorkflow && (
+      <fieldset>
+        <legend>Approve exact Gmail delivery</legend>
+        <label>
+          Gmail sending account
+          <select
+            value={gmailAccount}
+            onChange={(e) => setApprovalAccount(e.target.value)}
+          >
+            <option value="">Choose connected Gmail</option>
+            {state.connections
+              .filter((c) => c.provider === "gmail" && c.status === "connected")
+              .map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.address}
+                </option>
+              ))}
+          </select>
+        </label>
+        <p className="helper">
+          {state.capabilities.production_outreach
+            ? "Professor outreach is enabled. Only the exact recipients you approve will be contacted."
+            : "Controlled testing only: " +
+              state.capabilities.test_recipients.join(", ")}
+          . Approval schedules real delivery at or after the displayed time. Up
+          to 10 messages per approval; attachments require individual review.
+        </p>
+        {items.some((m) => m.followup_proposal) && (
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={authorizeImportedFollowups}
+              onChange={(e) => setAuthorizeImportedFollowups(e.target.checked)}
+            />
+            I explicitly authorize each exact follow-up shown below, for its
+            displayed recipient and delay, only if no reply is detected.
+          </label>
+        )}
+        {items.map((m) => (
+          <details key={m.id} open>
+            <summary>
+              {m.professor_email} - {m.subject}
+            </summary>
+            <pre className="email-preview">{m.body}</pre>
+            <p>
+              {displayDate(m.scheduled_at, m.timezone)} ({m.timezone})
+            </p>
+            {m.followup_proposal &&
+              (() => {
+                const f = JSON.parse(m.followup_proposal);
+                return (
+                  <div>
+                    <strong>
+                      {f.days}-day follow-up to {m.professor_email}: {f.subject}
+                    </strong>
+                    <pre className="email-preview">{f.body}</pre>
+                    <small>
+                      {authorizeImportedFollowups
+                        ? "Will be authorized with this approval"
+                        : "Inactive - not authorized"}
+                    </small>
+                  </div>
+                );
+              })()}
+          </details>
+        ))}
+      </fieldset>
+    );
+  const deliveryLabel = (m: Message) => {
+    const t = state.transports.find((t) => t.message_id === m.id);
+    if (t?.state === "confirmed" && t.provider_id)
+      return m.status === "replied" ? "Replied" : "Sent through Gmail";
+    if (t?.state === "uncertain") return "Confirmation pending - do not resend";
+    if (t?.state === "submitting" || t?.state === "leased") return "Sending";
+    if (m.status === "sent" && !t) return "Simulated (historical)";
+    if (m.status === "pending")
+      return m.live_ready
+        ? "Scheduled"
+        : "Historical - awaiting fresh approval";
+    return m.status === "draft"
+      ? "Draft - awaiting approval"
+      : m.status.charAt(0).toUpperCase() + m.status.slice(1);
+  };
   const table = (items: Message[]) => (
     <div className="table-scroll">
       <table>
@@ -545,20 +723,24 @@ export default function Home() {
           {items.map((m) => (
             <tr key={m.id}>
               <td>
-                {m.mode === "manual" && m.status === "draft" && (
-                  <input
-                    aria-label={`Select ${m.professor_name}`}
-                    type="checkbox"
-                    checked={selected.includes(m.id)}
-                    onChange={(e) =>
-                      setSelected(
-                        e.target.checked
-                          ? [...selected, m.id]
-                          : selected.filter((x) => x !== m.id),
-                      )
-                    }
-                  />
-                )}
+                {m.mode === "manual" &&
+                  (m.status === "draft" ||
+                    (realWorkflow &&
+                      m.status === "pending" &&
+                      !m.live_ready)) && (
+                    <input
+                      aria-label={`Select ${m.professor_name}`}
+                      type="checkbox"
+                      checked={selected.includes(m.id)}
+                      onChange={(e) =>
+                        setSelected(
+                          e.target.checked
+                            ? [...selected, m.id]
+                            : selected.filter((x) => x !== m.id),
+                        )
+                      }
+                    />
+                  )}
               </td>
               <td>
                 <button className="text-link" onClick={() => setReview(m)}>
@@ -576,7 +758,9 @@ export default function Home() {
                 </span>
               </td>
               <td>
-                <span className={"badge " + m.status}>{m.status}</span>
+                <span className={"badge " + m.status}>
+                  {realWorkflow ? deliveryLabel(m) : m.status}
+                </span>
                 {m.error && <small>{m.error}</small>}
               </td>
               <td>
@@ -588,24 +772,38 @@ export default function Home() {
               </td>
               <td>
                 <div className="actions">
-                  {m.status === "draft" && (
+                  {(m.status === "draft" ||
+                    (realWorkflow &&
+                      m.status === "pending" &&
+                      !m.live_ready)) && (
                     <button onClick={() => setReview(m)}>Review</button>
                   )}
-                  {m.status === "pending" && (
-                    <button
-                      disabled={busy}
-                      onClick={() =>
-                        act(async () => {
-                          await request(
-                            `/messages/${m.id}/simulate-failure`,
-                            "POST",
-                          );
-                        }, "Provider failure simulated; no email sent")
-                      }
-                    >
-                      Simulate failure
-                    </button>
-                  )}
+                  {state.capabilities.mock_delivery &&
+                    m.status === "pending" && (
+                      <button
+                        disabled={busy}
+                        onClick={() =>
+                          act(async () => {
+                            await request(
+                              `/messages/${m.id}/simulate-failure`,
+                              "POST",
+                            );
+                          }, "Provider failure simulated; no email sent")
+                        }
+                      >
+                        Simulate failure
+                      </button>
+                    )}
+                  {realWorkflow &&
+                    m.status === "failed" &&
+                    state.transports.some(
+                      (t) => t.message_id === m.id && t.state === "failed",
+                    ) &&
+                    !m.parent_id && (
+                      <button disabled={busy} onClick={() => setReview(m)}>
+                        Review retry
+                      </button>
+                    )}
                   {["draft", "pending"].includes(m.status) && (
                     <button
                       onClick={() =>
@@ -709,11 +907,15 @@ export default function Home() {
             </p>
             <small>
               {state.capabilities.live_email
-                ? "Controlled live tests enabled."
-                : "Email sending is simulated."}{" "}
+                ? state.capabilities.production_outreach
+                  ? "Real Gmail outreach enabled."
+                  : "Real Gmail enabled - controlled testing."
+                : state.capabilities.mock_delivery
+                  ? "Email sending is simulated."
+                  : "Real sending disabled. Drafts cannot send."}{" "}
               {state.capabilities.ai === "groq"
                 ? "Groq template selection active."
-                : "AI templates are simulated."}
+                : "Editable factual templates active."}
             </small>
           </div>
           <button className="user" onClick={() => setView("Academic profile")}>
@@ -770,7 +972,9 @@ export default function Home() {
               <span className="dot" />
               {state.capabilities.live_email
                 ? "Controlled live tests"
-                : "Mock environment"}
+                : state.capabilities.mock_delivery
+                  ? "Mock environment"
+                  : "Real sending disabled"}
             </span>
             <button
               aria-label="Follow-up notifications"
@@ -1106,7 +1310,7 @@ export default function Home() {
                   checked={includeImportDrafts}
                   onChange={(e) => setIncludeImportDrafts(e.target.checked)}
                 />
-                Also prepare fully specified manual mock drafts (up to 25 rows;
+                Also prepare fully specified email drafts (up to 25 rows;
                 requires subject, body, scheduled_at; optional timezone and
                 follow-up rules). Review and batch approve separately; never
                 sends on import.
@@ -1236,36 +1440,53 @@ export default function Home() {
                 <div className="actions">
                   <button
                     className="secondary"
-                    disabled={busy || !selected.length}
+                    disabled={
+                      busy ||
+                      !selected.length ||
+                      (realWorkflow &&
+                        (!gmailAccount ||
+                          selected.length > 10 ||
+                          !state.capabilities.live_email))
+                    }
                     onClick={() =>
                       act(async () => {
                         await request("/messages/approve", "POST", {
                           ids: selected,
+                          ...approvalOptions(),
                         });
                         setSelected([]);
                       }, "Selected manual drafts approved")
                     }
                   >
-                    Approve selected ({selected.length})
+                    {realWorkflow
+                      ? "Approve & schedule selected"
+                      : "Approve selected"}{" "}
+                    ({selected.length})
                   </button>
-                  <button
-                    className="secondary"
-                    disabled={busy}
-                    onClick={() =>
-                      act(async () => {
-                        await request("/jobs/run", "POST");
-                      }, "Due approved messages processed by mock provider")
-                    }
-                  >
-                    Run mock scheduler
-                  </button>
+                  {state.capabilities.mock_delivery && (
+                    <button
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() =>
+                        act(async () => {
+                          await request("/jobs/run", "POST");
+                        }, "Due approved messages processed by mock provider")
+                      }
+                    >
+                      Run mock scheduler
+                    </button>
+                  )}
                 </div>
               </div>
+              {selected.length > 0 &&
+                approvalControls(
+                  messages.filter((m) => selected.includes(m.id)),
+                )}
               {table(filtered)}
               <div className="panel-footer">
                 <ShieldCheck size={16} /> AI review drafts require individual
-                approval. Auto mode requires explicit authorization. No real
-                email is sent.
+                approval. Gmail delivery requires your exact message approval;
+                follow-ups need separate explicit authorization.
               </div>
             </section>
           )}
@@ -1486,16 +1707,47 @@ export default function Home() {
             <section className="panel">
               <div className="panel-heading">
                 <div>
-                  <h2>Follow-up reminders</h2>
+                  <h2>Follow-ups and reminders</h2>
                   <p>
-                    Reminders only. Follow-up emails are never sent
-                    automatically.
+                    Automatic follow-ups require your exact authorization. A
+                    reply, decline or opt-out cancels them. Manual reminders do
+                    not send email.
                   </p>
                 </div>
                 <span className="badge pending">
                   {followups.length} reminders
                 </span>
               </div>
+              {state.automation.map((a) => {
+                const parent = messages.find((m) => m.id === a.message_id);
+                if (!parent) return null;
+                const child = messages.find((m) => m.parent_id === parent.id);
+                const label = child
+                  ? "Follow-up: " + deliveryLabel(child)
+                  : a.generated
+                    ? "Follow-up cancelled"
+                    : parent.status === "sent"
+                      ? "Follow-up scheduled"
+                      : "Follow-up authorized - waiting for initial delivery";
+                return (
+                  <div className="document-row" key={a.message_id}>
+                    <div>
+                      <strong>{label}</strong>
+                      <p>
+                        {parent.professor_email} - {a.days} days after confirmed
+                        sending
+                      </p>
+                      <p>{a.subject}</p>
+                      <button
+                        className="secondary"
+                        onClick={() => setReview(parent)}
+                      >
+                        Review follow-up
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
               {followups.map((m) => (
                 <div className="document-row" key={m.id}>
                   <div className="file-icon">
@@ -1548,10 +1800,9 @@ export default function Home() {
               <section className="panel settings-card">
                 <h2>Email connections</h2>
                 <p>
-                  Mock delivery remains available without a mailbox. Connecting
-                  grants the displayed provider scopes; live sending is
-                  separately disabled unless configured for controlled test
-                  recipients.
+                  Gmail delivers only approved messages. Reply access lets the
+                  scheduler cancel follow-ups. Controlled testing remains
+                  restricted until the owner activates professor outreach.
                 </p>
                 {(["gmail", "outlook"] as const).map((provider) => (
                   <div className="provider" key={provider}>
@@ -1589,7 +1840,17 @@ export default function Home() {
                 {state.connections.map((account) => (
                   <div className="provider" key={account.id}>
                     <strong>{account.address}</strong>
-                    <span>{account.status}</span>
+                    <span>
+                      {account.provider === "gmail" ? "Gmail " : "Outlook "}
+                      {account.status}
+                    </span>
+                    {state.mailbox_checks
+                      ?.filter((k) => k.connection_id === account.id)
+                      .map((k) => (
+                        <small key={k.connection_id}>
+                          {k.status}: {k.detail}
+                        </small>
+                      ))}
                     <button
                       className="secondary"
                       disabled={busy}
@@ -1606,11 +1867,72 @@ export default function Home() {
                     </button>
                   </div>
                 ))}
+                {realWorkflow && (
+                  <div>
+                    <h3>
+                      Real sending{" "}
+                      {state.capabilities.live_email ? "enabled" : "disabled"}
+                    </h3>
+                    <p>
+                      {state.capabilities.production_outreach
+                        ? "Professor outreach activated by owner"
+                        : "Controlled testing: " +
+                          state.capabilities.test_recipients.join(", ")}
+                    </p>
+                    {state.capabilities.live_owner && (
+                      <>
+                        <p>
+                          Production activation requires a confirmed Gmail
+                          delivery to both test addresses and a detected reply
+                          to a test. Test delivery:{" "}
+                          {state.capabilities.activation.delivered
+                            ? "passed"
+                            : "pending"}
+                          . Reply detection:{" "}
+                          {state.capabilities.activation.reply_detected
+                            ? "passed"
+                            : "pending"}
+                          .
+                        </p>
+                        <button
+                          className="secondary"
+                          disabled={
+                            busy ||
+                            !state.capabilities.live_email ||
+                            (!state.capabilities.production_outreach &&
+                              !state.capabilities.activation.can_activate)
+                          }
+                          onClick={() => {
+                            if (
+                              !window.confirm(
+                                state.capabilities.production_outreach
+                                  ? "Restrict future sends to controlled test recipients?"
+                                  : "Enable real outreach to professor addresses you explicitly enter/import and approve? This does not approve any messages.",
+                              )
+                            )
+                              return;
+                            act(async () => {
+                              await request("/outreach/mode", "POST", {
+                                production_enabled:
+                                  !state.capabilities.production_outreach,
+                                confirmed: true,
+                              });
+                            }, "Sending mode updated; message approval is still required");
+                          }}
+                        >
+                          {state.capabilities.production_outreach
+                            ? "Return to controlled testing"
+                            : "Activate professor outreach"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
                 <h3>AI provider</h3>
                 <p>
                   {state.capabilities.ai === "groq"
                     ? "Groq configured with safe template fallback"
-                    : "Editable mock templates"}{" "}
+                    : "Editable factual templates"}{" "}
                   ? {state.ai_usage.requests} AI requests /{" "}
                   {state.ai_usage.tokens} tokens used
                 </p>
@@ -1948,6 +2270,10 @@ export default function Home() {
                       await request("/messages", "POST", {
                         ...draft,
                         sending_account_id: draft.sending_account_id || null,
+                        mode:
+                          realWorkflow && draft.mode === "auto"
+                            ? "review"
+                            : draft.mode,
                         followup: draft.followup_enabled
                           ? {
                               days: draft.followup_days,
@@ -1983,16 +2309,24 @@ export default function Home() {
                       })
                     }
                   >
-                    <option value="">Mock mailbox (no real email)</option>
+                    <option value="">
+                      {realWorkflow
+                        ? "Choose Gmail during review"
+                        : "Mock mailbox (no real email)"}
+                    </option>
                     {state.connections
-                      .filter((a) => a.status === "connected")
+                      .filter(
+                        (a) =>
+                          a.status === "connected" &&
+                          (!realWorkflow || a.provider === "gmail"),
+                      )
                       .map((a) => (
                         <option
                           key={a.id}
                           value={a.id}
                           disabled={!state.capabilities.live_email}
                         >
-                          {a.address} - live controlled test
+                          {a.address} - real Gmail
                         </option>
                       ))}
                   </select>
@@ -2043,7 +2377,7 @@ export default function Home() {
                     <option value="review">
                       B · AI draft + individual review
                     </option>
-                    <option value="auto">
+                    <option value="auto" disabled={realWorkflow}>
                       C · AI draft + explicit auto-send authorization
                     </option>
                   </select>
@@ -2338,7 +2672,7 @@ export default function Home() {
                 >
                   {draft.mode === "auto"
                     ? draft.sending_account_id
-                      ? "Authorize & schedule LIVE test email"
+                      ? "Save for Gmail review"
                       : "Authorize & schedule mock email"
                     : "Save draft for review"}
                   <Send size={16} />
@@ -2481,7 +2815,15 @@ export default function Home() {
                     ))}
                   </div>
                 )}
-                {review.status === "draft" && (
+                {(review.status === "draft" ||
+                  (realWorkflow &&
+                    review.status === "pending" &&
+                    !review.live_ready)) &&
+                  approvalControls([review])}
+                {(review.status === "draft" ||
+                  (realWorkflow &&
+                    review.status === "pending" &&
+                    !review.live_ready)) && (
                   <button
                     className="primary"
                     disabled={busy}
@@ -2489,13 +2831,71 @@ export default function Home() {
                       act(async () => {
                         await request("/messages/approve", "POST", {
                           ids: [review.id],
+                          ...approvalOptions(),
                         });
                         setReview(null);
                       }, "Reviewed email approved for its selected mailbox")
                     }
                   >
-                    <Check size={16} /> Approve this exact email
+                    <Check size={16} />{" "}
+                    {realWorkflow
+                      ? "Approve & schedule through Gmail"
+                      : "Approve this exact email"}
                   </button>
+                )}
+                {realWorkflow && (
+                  <div>
+                    <p>{deliveryLabel(review)}</p>
+                    {state.transports
+                      .filter((t) => t.message_id === review.id)
+                      .map((t) => (
+                        <p key={t.message_id}>
+                          Attempts: {t.attempts}. Gmail message ID:{" "}
+                          {t.provider_id || "Not accepted yet"}.{" "}
+                          {t.state === "waiting" && t.next_at > Date.now()
+                            ? "Retry scheduled: " +
+                              new Date(t.next_at).toLocaleString()
+                            : ""}
+                        </p>
+                      ))}
+                    {state.delivery_attempts
+                      ?.filter((a) => a.message_id === review.id)
+                      .map((a) => (
+                        <p key={a.id}>
+                          Attempt {a.attempt}: {a.outcome} (
+                          {new Date(a.started_at).toLocaleString()})
+                        </p>
+                      ))}
+                    {review.status === "failed" &&
+                      !review.parent_id &&
+                      state.transports.some(
+                        (t) =>
+                          t.message_id === review.id && t.state === "failed",
+                      ) && (
+                        <button
+                          className="primary"
+                          disabled={busy}
+                          onClick={() => {
+                            if (
+                              !window.confirm(
+                                "Retry this exact recipient and message through Gmail? Cancelled follow-ups will remain cancelled.",
+                              )
+                            )
+                              return;
+                            act(async () => {
+                              await request(
+                                `/messages/${review.id}/retry`,
+                                "POST",
+                                { confirmed: true },
+                              );
+                              setReview(null);
+                            }, "Exact Gmail retry authorized");
+                          }}
+                        >
+                          Retry exact message
+                        </button>
+                      )}
+                  </div>
                 )}
                 {review.status === "sent" && (
                   <form

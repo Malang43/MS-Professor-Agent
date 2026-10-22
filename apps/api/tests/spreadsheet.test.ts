@@ -215,7 +215,7 @@ describe("Excel-to-outbox import", () => {
     expect(h.db.prepare("SELECT count(*) n FROM professors").get()!.n).toBe(0);
     expect(h.db.prepare("SELECT count(*) n FROM messages").get()!.n).toBe(0);
   });
-  it("supports blank optional follow-up rules and defaults display timezone to UTC", () => {
+  it("supports blank optional follow-up rules and defaults display timezone to Asia/Karachi", () => {
     expect(
       spreadsheetDraft(
         {
@@ -227,7 +227,10 @@ describe("Excel-to-outbox import", () => {
         },
         0,
       ),
-    ).toMatchObject({ timezone: "UTC", email: "controlled@example.com" });
+    ).toMatchObject({
+      timezone: "Asia/Karachi",
+      email: "controlled@example.com",
+    });
     expect(
       spreadsheetDraft(
         { ...row, followup_days: "", followup_subject: "", followup_body: "" },
