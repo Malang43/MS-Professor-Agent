@@ -31,6 +31,19 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
       409,
       "Choose a connected Gmail account with sending permission.",
     );
+  const readiness = await env.DB.prepare(
+    "SELECT status,checked_at FROM mailbox_checks WHERE connection_id=?",
+  )
+    .bind(input.sending_account_id)
+    .first<any>();
+  if (
+    readiness?.status !== "ready" ||
+    readiness.checked_at < Date.now() - 3600000
+  )
+    throw new HttpError(
+      409,
+      "Gmail provider verification is not ready. Open Settings, resolve the displayed issue and click Verify Gmail connection before approving.",
+    );
   const attachments = await env.DB.prepare(
     "SELECT message_id,document_id FROM message_attachments WHERE user_id=? AND message_id IN (SELECT value FROM json_each(?))",
   )

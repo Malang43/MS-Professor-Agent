@@ -598,7 +598,7 @@ export async function queueFollowups(env: Env) {
         subject: row.subject,
         body: row.body,
         key: id + "@ms-professor-agent.invalid",
-        threadId: row.thread_id,
+        threadId: row.subject === snapshot.subject ? row.thread_id : undefined,
         inReplyTo: snapshot.key,
       };
     try {

@@ -624,6 +624,15 @@ export default function Home() {
     realWorkflow && (
       <fieldset>
         <legend>Approve exact Gmail delivery</legend>
+        {state.mailbox_checks
+          ?.filter(
+            (k) => k.connection_id === gmailAccount && k.status !== "ready",
+          )
+          .map((k) => (
+            <p role="alert" key={k.connection_id}>
+              {k.detail}
+            </p>
+          ))}
         <label>
           Gmail sending account
           <select
@@ -1961,6 +1970,19 @@ export default function Home() {
                 >
                   Check replies now
                 </button>
+                {realWorkflow && (
+                  <button
+                    className="secondary"
+                    disabled={busy}
+                    onClick={() =>
+                      act(async () => {
+                        await request("/connections/check", "POST", {});
+                      }, "Gmail provider verification updated; review the connection result above")
+                    }
+                  >
+                    Verify Gmail connection
+                  </button>
+                )}
                 <h3>Notifications</h3>
                 {state.notifications.map((item) => (
                   <p key={item.id}>

@@ -400,6 +400,36 @@ describe("reply-driven follow-up safety", () => {
     makeDue();
     return a;
   }
+  it("preserves Gmail threading for a matching exact follow-up subject", async () => {
+    const a = await sent();
+    h.db
+      .prepare(
+        "UPDATE automation SET subject=(SELECT subject FROM messages WHERE id=?) WHERE message_id=?",
+      )
+      .run(a.message, a.message);
+    await syncReplies(h.env, (async () =>
+      Response.json({ messages: [] })) as any);
+    await queueFollowups(h.env);
+    const snapshot = JSON.parse(
+      String(
+        h.db
+          .prepare(
+            "SELECT t.snapshot FROM transports t JOIN messages m ON m.id=t.message_id WHERE m.parent_id=?",
+          )
+          .get(a.message)!.snapshot,
+      ),
+    );
+    expect(snapshot.threadId).toBe("thread");
+    expect(snapshot.inReplyTo).toBe(
+      JSON.parse(
+        String(
+          h.db
+            .prepare("SELECT snapshot FROM transports WHERE message_id=?")
+            .get(a.message)!.snapshot,
+        ),
+      ).key,
+    );
+  });
   it("requires a successful complete reply check and creates at most one exact preauthorised follow-up", async () => {
     const a = await sent();
     await queueFollowups(h.env);
@@ -411,6 +441,15 @@ describe("reply-driven follow-up safety", () => {
       .prepare("SELECT * FROM messages WHERE parent_id=?")
       .all(a.message);
     expect(children).toHaveLength(1);
+    const childSnapshot = JSON.parse(
+      String(
+        h.db
+          .prepare("SELECT snapshot FROM transports WHERE message_id=?")
+          .get(children[0].id)!.snapshot,
+      ),
+    );
+    expect(childSnapshot.threadId).toBeUndefined(); // Different exact subjects are tracked in their own Gmail thread.
+    expect(childSnapshot.inReplyTo).toBeTruthy();
     expect(children[0]).toMatchObject({
       subject: "Exact follow-up",
       body: "Exact follow-up body",

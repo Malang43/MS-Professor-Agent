@@ -53,6 +53,11 @@ beforeEach(async () => {
       tokens,
       Date.now() + 3600000,
     );
+  h.db
+    .prepare(
+      "INSERT INTO mailbox_checks(connection_id,checked_at,status,detail) VALUES(?,?,'ready','Synthetic provider fixture')",
+    )
+    .run(connection, Date.now());
   vi.stubGlobal(
     "fetch",
     vi.fn(() => {
@@ -82,6 +87,39 @@ const send = () =>
     Response.json({ id: "gmail-accepted", threadId: "gmail-thread" }),
   );
 describe("real Gmail production workflow", () => {
+  it("blocks message approval when read-only Gmail readiness fails", async () => {
+    const [draft] = await importRows();
+    h.db.prepare("UPDATE mailbox_checks SET status='failed'").run();
+    expect((await approve([draft.id])).status).toBe(409);
+    expect(h.db.prepare("SELECT count(*) n FROM transports").get()!.n).toBe(0);
+  });
+
+  it("reports only a safe provider reason when Gmail API is disabled", async () => {
+    const network = vi.fn(async () =>
+      Response.json(
+        {
+          error: {
+            code: 403,
+            details: [
+              {
+                reason: "SERVICE_DISABLED",
+                metadata: { secret: "never persisted" },
+              },
+            ],
+          },
+        },
+        { status: 403 },
+      ),
+    );
+    await checkGmail(h.env, network as any, owner.id);
+    const check = h.db
+      .prepare("SELECT status,detail FROM mailbox_checks")
+      .get()!;
+    expect(check.status).toBe("failed");
+    expect(check.detail).toContain("SERVICE_DISABLED");
+    expect(check.detail).not.toContain("never persisted");
+  });
+
   it("blocks duplicate real approvals across separate drafts with the same recipient, content and schedule", async () => {
     const [draft] = await importRows();
     expect((await approve([draft.id])).status).toBe(200);
@@ -375,7 +413,7 @@ describe("real Gmail production workflow", () => {
           })
         : Response.json({ emailAddress: "sender@example.com" }),
     );
-    await checkGmail(h.env, network as any);
+    await checkGmail(h.env, network as any, owner.id);
     expect(network).toHaveBeenCalledTimes(2);
     expect(
       h.db.prepare("SELECT status FROM mailbox_checks").get()!.status,

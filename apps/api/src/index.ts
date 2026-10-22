@@ -208,6 +208,11 @@ async function route(req: Request, env: Env): Promise<Response> {
     z.object({ confirmed: z.literal(true) }).parse(await req.json());
     return retryGmail(env, user, retry[1]);
   }
+  if (path === "/api/connections/check" && method === "POST") {
+    await consume(env, `mailbox-check:${user}`, 5);
+    await checkGmail(env, fetch, user);
+    return json({ ok: true });
+  }
   const connectionStart = path.match(
     /^\/api\/connections\/(gmail|outlook)\/start$/,
   );

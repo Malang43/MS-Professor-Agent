@@ -78,13 +78,28 @@ export async function changeProductionMode(
     ),
   ]);
 }
+export async function gmailProfileRequest(network: Fetcher, token: string) {
+  return network.call(
+    globalThis,
+    "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+    {
+      headers: { Authorization: "Bearer " + token },
+      signal: AbortSignal.timeout(15000),
+      redirect: "manual",
+    },
+  );
+}
 // A read-only Gmail call verifies decryption, refresh and provider access. No send API.
-export async function checkGmail(env: Env, network: Fetcher = fetch) {
+export async function checkGmail(
+  env: Env,
+  network: Fetcher = fetch,
+  user?: string,
+) {
   if (!oauthAvailable(env, "gmail")) return;
   const rows = await env.DB.prepare(
-    "SELECT c.* FROM connections c LEFT JOIN mailbox_checks k ON k.connection_id=c.id WHERE c.provider='gmail' AND c.status='connected' AND (k.checked_at IS NULL OR k.checked_at<?) ORDER BY COALESCE(k.checked_at,0) LIMIT 1",
+    "SELECT c.* FROM connections c LEFT JOIN mailbox_checks k ON k.connection_id=c.id WHERE c.provider='gmail' AND c.status='connected' AND (? IS NULL OR c.user_id=?) AND (k.checked_at IS NULL OR k.checked_at<? OR ?=1) ORDER BY COALESCE(k.checked_at,0) LIMIT 1",
   )
-    .bind(Date.now() - 3600000)
+    .bind(user || null, user || null, Date.now() - 3600000, user ? 1 : 0)
     .all<any>();
   for (const row of rows.results) {
     if (!isLiveOwner(env, row.user_id)) continue;
@@ -93,23 +108,74 @@ export async function checkGmail(env: Env, network: Fetcher = fetch) {
     try {
       if (!/gmail.send/.test(row.scopes) || !/gmail.readonly/.test(row.scopes))
         throw new Error("scopes");
+      detail =
+        "Encrypted Gmail token access or refresh failed; review the connection.";
       const token = await accessToken(env, row, network);
-      const response = await network.call(
-        globalThis,
-        "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-        {
-          headers: { Authorization: "Bearer " + token },
-          signal: AbortSignal.timeout(15000),
-          redirect: "error",
-        },
-      );
+      detail =
+        "Gmail profile request could not complete; provider/network access needs review.";
+      const response = await gmailProfileRequest(network, token);
       if (!response.ok) {
-        await response.body?.cancel();
+        let category = "unclassified";
+        const reader = response.body?.getReader();
+        if (reader) {
+          const chunks: Uint8Array[] = [];
+          let total = 0;
+          try {
+            while (true) {
+              const part = await reader.read();
+              if (part.done) break;
+              total += part.value.byteLength;
+              if (total > 8192) break;
+              chunks.push(part.value);
+            }
+            if (total <= 8192) {
+              const bytes = new Uint8Array(total);
+              let offset = 0;
+              for (const chunk of chunks) {
+                bytes.set(chunk, offset);
+                offset += chunk.length;
+              }
+              const error = JSON.parse(new TextDecoder().decode(bytes))?.error;
+              const reasons = [
+                ...(error?.errors || []).map((e: any) => e.reason),
+                ...(error?.details || []).map((e: any) => e.reason),
+              ];
+              category =
+                reasons.find((v: any) =>
+                  [
+                    "accessNotConfigured",
+                    "insufficientPermissions",
+                    "forbidden",
+                    "authError",
+                    "rateLimitExceeded",
+                    "dailyLimitExceeded",
+                    "userRateLimitExceeded",
+                    "SERVICE_DISABLED",
+                    "ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+                  ].includes(v),
+                ) || "unclassified";
+            }
+          } catch {
+          } finally {
+            await reader.cancel().catch(() => {});
+          }
+        }
+        detail =
+          `Gmail profile access failed (HTTP ${response.status}; ${category}). ` +
+          (["SERVICE_DISABLED", "accessNotConfigured"].includes(category)
+            ? "Enable Gmail API in the existing Google OAuth project."
+            : category === "ACCESS_TOKEN_SCOPE_INSUFFICIENT" ||
+                category === "insufficientPermissions"
+              ? "Reconnect Gmail with reply access."
+              : "Review Gmail provider permissions or retry after a temporary service failure.");
         throw new Error("profile");
       }
       const data = (await response.json()) as { emailAddress?: string };
-      if (data.emailAddress?.toLowerCase() !== row.address.toLowerCase())
+      if (data.emailAddress?.toLowerCase() !== row.address.toLowerCase()) {
+        detail =
+          "Gmail profile identity does not match the connected account. Reconnect the intended mailbox.";
         throw new Error("identity");
+      }
       status = "ready";
       detail =
         "Gmail identity, encrypted token access, send/reply scopes and refresh path verified. No email sent.";

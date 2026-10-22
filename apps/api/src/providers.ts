@@ -49,8 +49,8 @@ export async function providerRequest(
   } catch {
     throw new ProviderError(sending ? "uncertain" : "retry");
   }
-  if (response.status === 401 || response.status === 403)
-    throw new ProviderError("reconnect");
+  if (response.status === 401) throw new ProviderError("reconnect");
+  if (response.status === 403) throw new ProviderError("rejected");
   if (response.status === 429)
     throw new ProviderError(
       "retry",
