@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 import Papa from "papaparse";
 import readXlsxFile from "read-excel-file";
+import { spreadsheetDraft } from "../../../shared/spreadsheet";
 import { localDate, zonedISO } from "../lib/timezone";
 
 // Production always uses the same-origin Vercel /api rewrite, including downloads.
@@ -80,6 +81,7 @@ type Message = {
   scheduled_at: string;
   timezone: string;
   followup_at: string | null;
+  followup_proposal?: string | null;
   attachments: string[];
   error: string | null;
 };
@@ -419,30 +421,12 @@ export default function Home() {
         throw new Error(
           "Import at most 25 fully specified draft emails at once. Professor-only imports still support 500 rows.",
         );
-      for (const [i, row] of rows.entries()) {
-        if (
-          !row.subject ||
-          row.subject.length > 500 ||
-          /[\r\n]/.test(row.subject) ||
-          !row.body ||
-          row.body.length > 20000 ||
-          !row.scheduled_at ||
-          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(
-            row.scheduled_at,
-          ) ||
-          !Number.isFinite(Date.parse(row.scheduled_at))
-        )
-          throw new Error(
-            "Row " +
-              (i + 2) +
-              ": provide subject, body and scheduled_at as a complete UTC ISO timestamp.",
-          );
-        try {
-          new Intl.DateTimeFormat("en", { timeZone: row.timezone || "UTC" });
-        } catch {
-          throw new Error("Row " + (i + 2) + ": invalid IANA timezone.");
-        }
-      }
+      rows.forEach((row, i) => spreadsheetDraft(row, i));
+      const result = await request("/imports/drafts", "POST", rows);
+      setNotice(
+        `${result.created} manual mock drafts prepared; ${result.skipped} matching drafts skipped. Follow-up proposals remain inactive. Review and approve separately. Nothing was sent.`,
+      );
+      return;
     }
     const result = await request(
       "/professors",
@@ -454,69 +438,11 @@ export default function Home() {
         interests: r.interests || "",
       })),
     );
-    if (includeImportDrafts) {
-      const saved = await request("/state");
-      let created = 0,
-        skipped = 0;
-      for (const row of rows) {
-        const professor = saved.professors.find(
-          (p: Professor) => p.email === row.email.toLowerCase(),
-        );
-        if (!professor)
-          throw new Error(
-            "Imported professor was unavailable; no further drafts created.",
-          );
-        const scheduled_at = new Date(row.scheduled_at).toISOString();
-        if (
-          saved.messages.some(
-            (m: Message) =>
-              m.professor_id === professor.id &&
-              m.subject === row.subject &&
-              m.body === row.body &&
-              m.scheduled_at === scheduled_at,
-          )
-        ) {
-          skipped++;
-          continue;
-        }
-        try {
-          await request("/messages", "POST", {
-            professor_id: professor.id,
-            subject: row.subject,
-            body: row.body,
-            mode: "manual",
-            authorized: false,
-            scheduled_at,
-            timezone: row.timezone || "UTC",
-            attachments: [],
-          });
-          created++;
-          saved.messages.push({
-            professor_id: professor.id,
-            subject: row.subject,
-            body: row.body,
-            scheduled_at,
-          });
-        } catch (e) {
-          throw new Error(
-            created +
-              " drafts saved before import stopped: " +
-              (e as Error).message +
-              ". Review Outreach before retrying; matching saved drafts are skipped.",
-          );
-        }
-      }
-      setNotice(
-        created +
-          " manual mock drafts prepared; " +
-          skipped +
-          " matching drafts skipped. Review exact content and select drafts for one-time batch approval in Outreach. Nothing was sent.",
-      );
-    } else
-      setNotice(
-        result.imported + " professors imported; duplicate emails skipped.",
-      );
+    setNotice(
+      result.imported + " professors imported; duplicate emails skipped.",
+    );
   }
+
   const messages = state?.messages || [],
     professors = state?.professors || [];
   const filtered = messages.filter(
@@ -1181,10 +1107,15 @@ export default function Home() {
                   onChange={(e) => setIncludeImportDrafts(e.target.checked)}
                 />
                 Also prepare fully specified manual mock drafts (up to 25 rows;
-                requires subject, body, scheduled_at and optional timezone).
-                Review and batch approve separately; never sends on import.
+                requires subject, body, scheduled_at; optional timezone and
+                follow-up rules). Review and batch approve separately; never
+                sends on import.
               </label>
               <p className="helper">
+                <a href="/professors-email-template.xlsx" download>
+                  Download Excel template
+                </a>
+                {" | "}
                 <a href="/professors-email-template.csv" download>
                   Download professor + email draft template
                 </a>
@@ -2250,8 +2181,8 @@ export default function Home() {
                           Delay (days)
                           <input
                             type="number"
-                            min={7}
-                            max={10}
+                            min={1}
+                            max={30}
                             value={draft.followup_days}
                             onChange={(e) =>
                               setDraft({
@@ -2438,6 +2369,57 @@ export default function Home() {
                         : ""}
                     </p>
                   ))}
+                {review.followup_proposal &&
+                  (() => {
+                    const proposal = JSON.parse(review.followup_proposal);
+                    return (
+                      <div>
+                        <h3>
+                          Inactive follow-up proposal: {proposal.days} days
+                          after confirmed sending
+                        </h3>
+                        <strong>{proposal.subject}</strong>
+                        <pre className="email-preview">{proposal.body}</pre>
+                        <p className="helper">
+                          Import and batch approval do not authorize this
+                          follow-up. Open the composer, select a mailbox, and
+                          explicitly authorize the exact follow-up before
+                          scheduling a live test.
+                        </p>
+                        {review.status === "draft" && (
+                          <button
+                            className="secondary"
+                            onClick={() => {
+                              setDraft({
+                                ...draft,
+                                professor_id: review.professor_id,
+                                subject: review.subject,
+                                body: review.body,
+                                scheduled_at: localDate(
+                                  review.timezone,
+                                  new Date(review.scheduled_at),
+                                ),
+                                timezone: review.timezone,
+                                mode: "review",
+                                authorized: false,
+                                sending_account_id: "",
+                                attachments: review.attachments,
+                                followup_enabled: true,
+                                followup_days: proposal.days,
+                                followup_subject: proposal.subject,
+                                followup_body: proposal.body,
+                                followup_authorized: false,
+                              });
+                              setReview(null);
+                              setModal("compose");
+                            }}
+                          >
+                            Use proposal in composer
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
                 {state.automation
                   .filter((a) => a.message_id === review.id)
                   .map((a) => (

@@ -2,6 +2,10 @@
 
 Prepared 2026-10-21 for private repository `Malang43/MS-Professor-Agent`. The mock-default application was deployed with explicit authorization on 2026-10-21. See [the production deployment report](docs/DEPLOYMENT-STATUS.md) for live URLs, resource IDs, verification results, and remaining tasks. Default production uses **Vercel Hobby + Workers Free + D1 Free + Workers KV Free**. No card, trial, paid upgrade, R2 subscription, purchased domain or real professor outreach is authorized. If an account/setup step requires payment details or an ineligible plan, stop that step and report it. No unlimited free usage is promised.
 
+## Excel-to-Gmail automation verification
+
+See [EXCEL-GMAIL-VERIFICATION.md](docs/EXCEL-GMAIL-VERIFICATION.md) for the full Excel template, atomic import and retry behavior, inactive follow-up proposals, configurable 1-30 day delays (including 3), final reply checks, mailbox limits, verification and live-test boundaries. Live delivery remains disabled.
+
 ## Current production release
 
 The Research Studio/account-security release is deployed and verified. See [STUDIO-PRODUCTION-STATUS.md](docs/STUDIO-PRODUCTION-STATUS.md) for actual Worker/Vercel revisions, checks and owner-dependent blockers. Live outreach remains disabled; the owner's existing Groq configuration is preserved. Transactional verification/reset delivery is not yet configured.
@@ -153,7 +157,7 @@ The live snapshot freezes recipient, content, selected account, attachments/chec
 
 Timeout/network/5xx ambiguity or an interrupted submitting lease becomes **uncertain**, never blindly resent. Gmail reconciliation uses stable RFC Message-ID; Graph uses a custom outreach header in recent Sent Items. Graph 202 means accepted, not confirmed. Its bounded lookup examines the most recent 25 sent items; absent/ambiguous evidence stays uncertain and requires review. Cancellation cannot undo an already accepted provider request.
 
-Reply checks cover tracked threads for 30 days, one thread and one new event per cron phase (manual user-scoped checks may inspect two threads). Graph pagination persists. Incomplete/oversized/failed reads cannot arm follow-ups. One optional exact-content follow-up can be explicitly authorized for 7-10 UTC elapsed days after confirmation, shown during review and bound to the same recipient/account/files. It requires a fresh complete reply check; known reply/decline/opt-out/bounce, disconnection, cancellation and manual outcomes stop it. Out-of-thread bounces and replies beyond the polling window need manual recording. This is not universal inbox/DSN classification. Manual reminders remain separate.
+Reply checks cover tracked threads for 31 days, one thread and one new event per cron phase (manual user-scoped checks may inspect two threads). Graph pagination persists. Incomplete/oversized/failed reads cannot arm follow-ups. One optional exact-content follow-up can be explicitly authorized for 1-30 UTC elapsed days after confirmation, shown during review and bound to the same recipient/account/files. It requires a fresh complete reply check; known reply/decline/opt-out/bounce, disconnection, cancellation and manual outcomes stop it. Out-of-thread bounces and replies beyond the polling window need manual recording. This is not universal inbox/DSN classification. Manual reminders remain separate.
 
 Workers Free currently has a 10 ms CPU budget. Native hashing, file checks and provider work need real platform measurement after approval. Local wall times do not certify CPU fitness. Never weaken password hashing or upgrade to hide failure. Watch Worker/D1/KV quotas; no paid queue/durable-object service is enabled.
 

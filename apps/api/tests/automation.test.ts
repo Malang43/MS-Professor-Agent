@@ -27,7 +27,7 @@ afterEach(() => {
   h.db.close();
   vi.unstubAllGlobals();
 });
-async function setup(provider = "gmail", followup = false) {
+async function setup(provider = "gmail", followup = false, days = 7) {
   const user = await h.user(crypto.randomUUID() + "@example.com"),
     connection = crypto.randomUUID(),
     professor = crypto.randomUUID();
@@ -71,7 +71,7 @@ async function setup(provider = "gmail", followup = false) {
       ...(followup
         ? {
             followup: {
-              days: 7,
+              days,
               subject: "Exact follow-up",
               body: "Exact follow-up body",
               authorized: true,
@@ -96,6 +96,115 @@ function makeDue() {
     .run();
 }
 describe("bounded reliable live-test outbox", () => {
+  it("supports a three-day authorized follow-up, never earlier, after a complete reply check", async () => {
+    const a = await setup("gmail", true, 3);
+    await runLiveJobs(h.env, (async () =>
+      Response.json({ id: "sent", threadId: "thread" })) as any);
+    h.db
+      .prepare("UPDATE messages SET sent_at=? WHERE id=?")
+      .run(new Date(Date.now() - 2 * 86400000).toISOString(), a.message);
+    makeDue();
+    await syncReplies(h.env, (async () =>
+      Response.json({ messages: [] })) as any);
+    await queueFollowups(h.env);
+    expect(
+      h.db
+        .prepare("SELECT count(*) n FROM messages WHERE parent_id IS NOT NULL")
+        .get()!.n,
+    ).toBe(0);
+    h.db
+      .prepare("UPDATE messages SET sent_at=? WHERE id=?")
+      .run(new Date(Date.now() - 3 * 86400000 - 1000).toISOString(), a.message);
+    await queueFollowups(h.env);
+    expect(
+      h.db
+        .prepare("SELECT count(*) n FROM messages WHERE parent_id IS NOT NULL")
+        .get()!.n,
+    ).toBe(1);
+  });
+  it("requires explicit follow-up authorization and accepts only delays within the configured range", async () => {
+    const a = await setup();
+    for (const followup of [
+      { days: 3, authorized: false },
+      { days: 3 },
+      { days: 0, authorized: true },
+      { days: 31, authorized: true },
+    ]) {
+      const result = await h.request(
+        "/messages",
+        "POST",
+        {
+          professor_id: a.professor,
+          subject: "s",
+          body: "b",
+          mode: "review",
+          scheduled_at: new Date().toISOString(),
+          timezone: "UTC",
+          sending_account_id: a.connection,
+          followup: {
+            subject: "follow-up",
+            body: "exact content",
+            ...followup,
+          },
+        },
+        a.session,
+      );
+      expect(result.status).toBe(400);
+    }
+    expect(h.db.prepare("SELECT count(*) n FROM automation").get()!.n).toBe(0);
+  });
+  it("does not submit unapproved or future scheduled messages", async () => {
+    const a = await setup();
+    const network = vi.fn();
+    h.db.prepare("UPDATE messages SET approved=0 WHERE id=?").run(a.message);
+    await runLiveJobs(h.env, network as any);
+    h.db
+      .prepare(
+        "UPDATE messages SET approved=1,scheduled_at='2099-01-01T00:00:00Z' WHERE id=?",
+      )
+      .run(a.message);
+    await runLiveJobs(h.env, network as any);
+    expect(network).not.toHaveBeenCalled();
+    expect(transport().attempts).toBe(0);
+  });
+  it("shares a mailbox minute limit across different application users", async () => {
+    await setup();
+    await setup();
+    const network = vi.fn(async () =>
+      Response.json({ id: "sent", threadId: "thread" }),
+    );
+    await runLiveJobs(h.env, network as any);
+    await runLiveJobs(h.env, network as any);
+    expect(network).toHaveBeenCalledTimes(1);
+    expect(h.db.prepare("SELECT count(*) n FROM deliveries").get()!.n).toBe(1);
+  });
+  it.each(["student", "mailbox", "global"])(
+    "enforces the %s daily send budget before provider submission",
+    async (scope) => {
+      const a = await setup();
+      const { hash } = await import("../src/runtime");
+      const key =
+        scope === "student"
+          ? `send:${a.id}:day`
+          : scope === "global"
+            ? "send:global:day"
+            : `send:mailbox:${await hash("gmail:synthetic-subject")}:day`;
+      h.db
+        .prepare(
+          "INSERT INTO usage_counters(scope,period,amount) VALUES(?,?,?)",
+        )
+        .run(
+          key,
+          new Date().toISOString().slice(0, 10),
+          scope === "global" ? 100 : 10,
+        );
+      const network = vi.fn();
+      await runLiveJobs(h.env, network as any);
+      expect(network).not.toHaveBeenCalled();
+      expect(transport().attempts).toBe(0);
+    },
+  );
+
   it("claims once across concurrent workers, preserves approved recipient/content, and never mock-delivers a live message", async () => {
     const a = await setup();
     h.db
@@ -357,6 +466,53 @@ describe("reply-driven follow-up safety", () => {
     ).toBe(1);
     await queueFollowups(h.env);
     expect(h.db.prepare("SELECT count(*) n FROM messages").get()!.n).toBe(1);
+  });
+  it("checks replies again before submitting an already queued child and cancels it on an arriving reply", async () => {
+    const a = await sent();
+    await syncReplies(h.env, (async () =>
+      Response.json({ messages: [] })) as any);
+    await queueFollowups(h.env);
+    makeDue();
+    const network = vi.fn(async () =>
+      Response.json({
+        messages: [
+          {
+            id: "late-reply",
+            internalDate: String(Date.now() - 1000),
+            snippet: "Thank you",
+            payload: {
+              headers: [{ name: "From", value: "controlled@example.com" }],
+            },
+          },
+        ],
+      }),
+    );
+    await runLiveJobs(h.env, network as any);
+    expect(network).toHaveBeenCalledTimes(1);
+    expect(
+      h.db
+        .prepare("SELECT status FROM messages WHERE parent_id=?")
+        .get(a.message)!.status,
+    ).toBe("cancelled");
+    expect(h.db.prepare("SELECT count(*) n FROM deliveries").get()!.n).toBe(1);
+  });
+  it("keeps a queued child unsent when its final reply check fails", async () => {
+    await sent();
+    await syncReplies(h.env, (async () =>
+      Response.json({ messages: [] })) as any);
+    await queueFollowups(h.env);
+    makeDue();
+    const network = vi.fn(async () => new Response(null, { status: 500 }));
+    await runLiveJobs(h.env, network as any);
+    expect(network).toHaveBeenCalledTimes(1);
+    expect(h.db.prepare("SELECT count(*) n FROM deliveries").get()!.n).toBe(1);
+    expect(
+      h.db
+        .prepare(
+          "SELECT attempts FROM transports WHERE message_id IN (SELECT id FROM messages WHERE parent_id IS NOT NULL)",
+        )
+        .get()!.attempts,
+    ).toBe(0);
   });
   it("cancels an already queued child after a manual reply", async () => {
     const a = await sent();

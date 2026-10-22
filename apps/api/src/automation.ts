@@ -1,4 +1,4 @@
-import { type Env, HttpError, consume, notify, random } from "./runtime";
+import { type Env, HttpError, consume, notify, random, hash } from "./runtime";
 import { accessToken, oauthAvailable } from "./oauth";
 import {
   emailProvider,
@@ -151,7 +151,7 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
     .bind(now)
     .run();
   const rows = await env.DB.prepare(
-    `SELECT t.*,c.provider,c.address,c.subject AS account_subject,c.status AS account_status,c.scopes,c.tokens,c.expires_at,c.refresh_until,c.refresh_lease,m.status AS message_status FROM transports t JOIN messages m ON m.id=t.message_id JOIN connections c ON c.id=t.connection_id JOIN profiles p ON p.user_id=t.user_id WHERE t.state IN ('waiting','uncertain') AND t.next_at<=? AND ((t.state='uncertain') OR (?=1 AND m.status='pending' AND m.approved=1 AND (m.mode!='auto' OR m.authorized=1) AND m.scheduled_at<=? AND p.paused=0 AND p.stopped=0)) ORDER BY t.next_at,t.message_id LIMIT 1`,
+    `SELECT t.*,c.provider,c.address,c.subject AS account_subject,c.status AS account_status,c.scopes,c.tokens,c.expires_at,c.refresh_until,c.refresh_lease,m.status AS message_status,m.parent_id FROM transports t JOIN messages m ON m.id=t.message_id JOIN connections c ON c.id=t.connection_id JOIN profiles p ON p.user_id=t.user_id WHERE t.state IN ('waiting','uncertain') AND t.next_at<=? AND ((t.state='uncertain') OR (?=1 AND m.status='pending' AND m.approved=1 AND (m.mode!='auto' OR m.authorized=1) AND m.scheduled_at<=? AND p.paused=0 AND p.stopped=0)) ORDER BY t.next_at,t.message_id LIMIT 1`,
   )
     .bind(now, +maySend, new Date().toISOString())
     .all<any>();
@@ -201,6 +201,29 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
       }
       continue;
     }
+    if (row.parent_id) {
+      // A queued child may wait through quota backoff. Recheck its parent thread
+      // at submission time; a failed/partial read must invalidate old evidence.
+      const checkedAfter = Date.now();
+      await env.DB.prepare(
+        "UPDATE transports SET sync_checked_at=0 WHERE message_id=?",
+      )
+        .bind(row.parent_id)
+        .run();
+      await syncReplies(env, network, row.user_id, row.parent_id);
+      const parent = await env.DB.prepare(
+        "SELECT m.status,t.sync_checked_at,t.sync_cursor FROM messages m JOIN transports t ON t.message_id=m.id WHERE m.id=? AND m.user_id=?",
+      )
+        .bind(row.parent_id, row.user_id)
+        .first<any>();
+      if (
+        !parent ||
+        parent.status !== "sent" ||
+        parent.sync_cursor ||
+        parent.sync_checked_at < checkedAfter
+      )
+        continue;
+    }
     const suppressed = await env.DB.prepare(
       "SELECT address FROM suppressions WHERE user_id=? AND address=?",
     )
@@ -232,6 +255,16 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
       );
       await consume(env, `send:${row.user_id}:day`, 10);
       await consume(env, "send:global:day", 100);
+      // Same provider identity shares a budget even across application users.
+      const mailbox = await hash(row.provider + ":" + row.account_subject);
+      await consume(
+        env,
+        `send:mailbox:${mailbox}:minute`,
+        1,
+        1,
+        new Date().toISOString().slice(0, 16),
+      );
+      await consume(env, `send:mailbox:${mailbox}:day`, 10);
       const token = await accessToken(env, connection, network),
         attachments = [];
       for (const attachment of snapshot.attachments) {
@@ -348,18 +381,22 @@ export async function syncReplies(
   env: Env,
   network: Fetcher = fetch,
   user?: string,
+  messageId?: string,
 ) {
   if (env.OAUTH_ENABLED !== "true" || !env.TOKEN_ENCRYPTION_KEY) return;
   const now = Date.now();
   const rows = await env.DB.prepare(
-    `SELECT t.*,m.sent_at,c.provider,c.status AS account_status,c.scopes,c.tokens,c.expires_at,c.refresh_until,c.refresh_lease FROM transports t JOIN messages m ON m.id=t.message_id JOIN connections c ON c.id=t.connection_id WHERE t.state='confirmed' AND t.thread_id IS NOT NULL AND t.next_sync<=? AND c.status='connected' AND m.sent_at>? AND (? IS NULL OR t.user_id=?) ORDER BY t.next_sync LIMIT ?`,
+    `SELECT t.*,m.sent_at,c.provider,c.status AS account_status,c.scopes,c.tokens,c.expires_at,c.refresh_until,c.refresh_lease FROM transports t JOIN messages m ON m.id=t.message_id JOIN connections c ON c.id=t.connection_id WHERE t.state='confirmed' AND t.thread_id IS NOT NULL AND (t.next_sync<=? OR t.message_id=?) AND c.status='connected' AND m.sent_at>? AND (? IS NULL OR t.user_id=?) AND (? IS NULL OR t.message_id=?) ORDER BY t.next_sync LIMIT ?`,
   )
     .bind(
       now,
-      new Date(now - 30 * 86400000).toISOString(),
+      messageId || null,
+      new Date(now - 31 * 86400000).toISOString(),
       user || null,
       user || null,
-      user ? 2 : 1,
+      messageId || null,
+      messageId || null,
+      messageId ? 1 : user ? 2 : 1,
     )
     .all<any>();
   for (const row of rows.results) {

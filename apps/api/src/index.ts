@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { spreadsheetDraft } from "../../../shared/spreadsheet";
 import {
   accountPublic,
   accountPrivate,
@@ -68,7 +69,7 @@ const messageSchema = z.object({
   sending_account_id: z.string().uuid().nullable().optional(),
   followup: z
     .object({
-      days: z.number().int().min(7).max(10),
+      days: z.number().int().min(1).max(30),
       subject: z
         .string()
         .min(1)
@@ -506,6 +507,59 @@ async function route(req: Request, env: Env): Promise<Response> {
         "Thank you for considering my inquiry. I appreciate your time.",
       );
     return json(draft);
+  }
+  if (path === "/api/imports/drafts" && method === "POST") {
+    const input = z
+      .array(z.record(z.string()))
+      .min(1)
+      .max(25)
+      .parse(await req.json());
+    const rows = await Promise.all(
+      input.map(async (row, i) => {
+        let draft;
+        try {
+          draft = spreadsheetDraft(row, i);
+        } catch (error) {
+          throw new HttpError(400, (error as Error).message);
+        }
+        professorSchema.parse(draft);
+        return {
+          ...draft,
+          id: id(),
+          professor_id: id(),
+          import_key: await digest(
+            JSON.stringify([
+              draft.email,
+              draft.subject,
+              draft.body,
+              draft.scheduled_at,
+            ]),
+          ),
+        };
+      }),
+    );
+    // Reserve the bounded import budget before a single atomic transaction. Retries
+    // may consume budget but can never create a second copy of the same email.
+    await consume(env, `messages:${user}`, 50, rows.length);
+    await consume(env, "messages:global", 500, rows.length);
+    const payload = JSON.stringify(rows);
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO professors(id,user_id,name,email,university,interests)
+        SELECT json_extract(value,'$.professor_id'),?,json_extract(value,'$.name'),json_extract(value,'$.email'),json_extract(value,'$.university'),json_extract(value,'$.interests') FROM json_each(?) WHERE 1
+        ON CONFLICT(user_id,email) DO NOTHING`,
+      ).bind(user, payload),
+      env.DB.prepare(
+        `INSERT INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone,followup_proposal,import_key)
+        SELECT json_extract(j.value,'$.id'),?,p.id,json_extract(j.value,'$.subject'),json_extract(j.value,'$.body'),'manual',0,0,'draft',json_extract(j.value,'$.scheduled_at'),json_extract(j.value,'$.timezone'),json_extract(j.value,'$.followup_proposal'),json_extract(j.value,'$.import_key')
+        FROM json_each(?) j JOIN professors p ON p.user_id=? AND p.email=json_extract(j.value,'$.email')
+        WHERE NOT EXISTS(SELECT 1 FROM messages m WHERE m.user_id=p.user_id AND m.professor_id=p.id AND m.subject=json_extract(j.value,'$.subject') AND m.body=json_extract(j.value,'$.body') AND m.scheduled_at=json_extract(j.value,'$.scheduled_at'))
+        ON CONFLICT(user_id,import_key) WHERE import_key IS NOT NULL DO NOTHING`,
+      ).bind(user, payload, user),
+      audit(env, user, "spreadsheet.drafts_imported"),
+    ]);
+    const created = results[1].meta.changes;
+    return json({ created, skipped: rows.length - created });
   }
   if (path === "/api/messages" && method === "POST") {
     const m = messageSchema.parse(await req.json());

@@ -81,3 +81,6 @@ tokens/
 
 # Wrangler CLI generated release-folder marker (actual artifacts remain under .wrangler).
 /studio-release-build/
+
+# Public synthetic workbook; private Excel files remain ignored.
+!/apps/web/public/professors-email-template.xlsx

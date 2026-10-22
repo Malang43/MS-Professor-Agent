@@ -1,2 +1,4 @@
-name,email,university,interests,subject,body,scheduled_at,timezone
-Professor Example,professor@example.edu,Example University,Robotics,MS research inquiry,"Dear Professor Example, I would like to discuss possible MS research directions. Please review and personalize this example before approval.",2099-01-01T12:00:00.000Z,UTC
+name,email,university,interests,subject,body,scheduled_at,timezone,followup_days,followup_subject,followup_body
+Synthetic Professor,controlled@example.com,Example University,Robotics and machine learning,MS research inquiry - sample only,"Dear Professor,
+This is synthetic sample content. Replace and review before approving.",2099-01-01T12:00:00Z,Asia/Karachi,3,Follow-up - sample only,"Dear Professor,
+Following up on my research inquiry. Thank you for your time."
