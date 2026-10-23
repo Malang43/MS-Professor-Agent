@@ -6,6 +6,8 @@ export interface Env {
   MAIL_FROM?: string;
   MAIL_SENDER_VERIFIED?: string;
   BREVO_API_KEY?: string;
+  MAILJET_API_KEY?: string;
+  MAILJET_SECRET_KEY?: string;
   DOCUMENTS_KV?: KVNamespace;
   DOCUMENTS?: R2Bucket; // Optional legacy adapter, not a production dependency.
   APP_ORIGIN: string;

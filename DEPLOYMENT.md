@@ -12,7 +12,7 @@ The current owner has authorized restricted live activation for `raza1206896@gma
 
 ## Transactional account email
 
-See [TRANSACTIONAL-EMAIL-RELEASE.md](docs/TRANSACTIONAL-EMAIL-RELEASE.md) for the tested branded verification/recovery adapter, atomic redemption and exact Brevo Free owner setup. Real account email remains disabled pending a verified sender, API key and genuine inbox certification. Existing Gmail outreach settings remain unchanged.
+See [MAILJET-ACCOUNT-EMAIL.md](docs/MAILJET-ACCOUNT-EMAIL.md) for the Mailjet Free integration, controlled delivery certification and current activation result. The earlier [Brevo runbook](docs/TRANSACTIONAL-EMAIL-RELEASE.md) remains historical; Mailjet uses the existing secure verification/recovery flows and installed Cloudflare secrets. Gmail outreach configuration remains separate and unchanged.
 
 ## Excel-to-Gmail automation verification
 
