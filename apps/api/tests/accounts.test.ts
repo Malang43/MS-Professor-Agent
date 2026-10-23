@@ -20,6 +20,7 @@ beforeEach(() => {
   links = [];
   Object.assign(h.env, {
     MAIL_PROVIDER: "brevo",
+    MAIL_SENDER_VERIFIED: "true",
     MAIL_DELIVERY_ENABLED: "true",
     MAIL_FREE_PLAN_CONFIRMED: "true",
     MAIL_FROM: "operator@example.com",
@@ -32,7 +33,7 @@ beforeEach(() => {
       expect(init.redirect).toBe("manual");
       const body = JSON.parse(init.body);
       links.push(body.textContent.match(/https:\/\/\S+/)[0]);
-      return Response.json({ messageId: "synthetic" });
+      return Response.json({ messageId: "synthetic" }, { status: 201 });
     }),
   );
 });
@@ -650,4 +651,145 @@ it("displays the frozen live recipient even if a legacy professor record changed
     await h.request("/state", "GET", undefined, user.session)
   ).json()) as any;
   expect(state.messages[0].professor_email).toBe("original@example.edu");
+});
+
+it("sends branded HTML and text with canonical fragment links and expiration", async () => {
+  await create();
+  const call = vi.mocked(fetch).mock.calls[0];
+  const body = JSON.parse(call[1]!.body as string);
+  expect(body.sender.name).toBe("MS Professor Agent");
+  expect(body.subject).toContain("MS Professor Agent");
+  expect(body.htmlContent).toContain("Verify email");
+  expect(body.htmlContent).toContain("24 hours");
+  expect(body.textContent).toContain("24 hours");
+  const link = new URL(links[0]);
+  expect(link.origin).toBe(h.env.APP_ORIGIN);
+  expect(link.search).toBe("");
+  expect(link.hash).toMatch(/^#verify=/);
+});
+it("allows an existing pending account to resend after delivery activation", async () => {
+  h.env.MAIL_DELIVERY_ENABLED = "false";
+  const session = await create();
+  expect(links).toHaveLength(0);
+  h.env.MAIL_DELIVERY_ENABLED = "true";
+  await h.request("/auth/resend-verification", "POST", undefined, session);
+  expect((await verify()).status).toBe(200);
+  await h.request("/auth/resend-verification", "POST", undefined, session);
+  expect(links).toHaveLength(1);
+  expect((await h.request("/state", "GET", undefined, session)).status).toBe(
+    200,
+  );
+});
+it("fails closed until sender verification is explicitly configured", async () => {
+  h.env.MAIL_SENDER_VERIFIED = "false";
+  const session = await create();
+  expect(links).toHaveLength(0);
+  expect(h.db.prepare("SELECT count(*) n FROM account_tokens").get()!.n).toBe(
+    0,
+  );
+  expect((await h.request("/state", "GET", undefined, session)).status).toBe(
+    403,
+  );
+});
+it("rolls verification and link consumption back together on database failure", async () => {
+  await create();
+  h.db.exec(
+    "CREATE TRIGGER fail_verify BEFORE UPDATE OF email_verified_at ON users BEGIN SELECT RAISE(ABORT,'synthetic failure'); END",
+  );
+  expect((await verify()).status).toBe(500);
+  expect(h.db.prepare("SELECT count(*) n FROM account_tokens").get()!.n).toBe(
+    1,
+  );
+  expect(
+    h.db.prepare("SELECT email_verified_at FROM users").get()!
+      .email_verified_at,
+  ).toBe(null);
+  h.db.exec("DROP TRIGGER fail_verify");
+  expect((await verify()).status).toBe(200);
+});
+it("rolls password change and session revocation back on token cleanup failure", async () => {
+  const session = await create();
+  await h.request("/auth/forgot-password", "POST", { email: signup.email });
+  const body = {
+    token: token(links[1]),
+    password: "New marble constellation stream 88",
+    confirm_password: "New marble constellation stream 88",
+  };
+  h.db.exec(
+    "CREATE TRIGGER fail_cleanup BEFORE DELETE ON account_tokens BEGIN SELECT RAISE(ABORT,'synthetic failure'); END",
+  );
+  expect((await h.request("/auth/reset-password", "POST", body)).status).toBe(
+    500,
+  );
+  expect((await h.request("/auth/me", "GET", undefined, session)).status).toBe(
+    200,
+  );
+  await login();
+  h.db.exec("DROP TRIGGER fail_cleanup");
+  expect((await h.request("/auth/reset-password", "POST", body)).status).toBe(
+    200,
+  );
+  const notification = JSON.parse(
+    vi.mocked(fetch).mock.calls.at(-1)![1]!.body as string,
+  );
+  expect(notification.subject).toContain("Your password was reset");
+  expect(notification.textContent).not.toContain(body.token);
+  expect(notification.textContent).not.toContain(body.password);
+});
+it("rejects expired reset links without changing password or sessions", async () => {
+  const session = await create();
+  await h.request("/auth/forgot-password", "POST", { email: signup.email });
+  h.db.exec("UPDATE account_tokens SET expires_at=0 WHERE purpose='reset'");
+  expect(
+    (
+      await h.request("/auth/reset-password", "POST", {
+        token: token(links[1]),
+        password,
+        confirm_password: password,
+      })
+    ).status,
+  ).toBe(400);
+  expect((await h.request("/auth/me", "GET", undefined, session)).status).toBe(
+    200,
+  );
+  await login();
+});
+it("cleans definite provider rejection without losing accounts and permits recovery", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.mocked(fetch).mockResolvedValueOnce(
+    Response.json({ private: "never logged" }, { status: 429 }),
+  );
+  const session = await create();
+  expect(h.db.prepare("SELECT count(*) n FROM account_tokens").get()!.n).toBe(
+    0,
+  );
+  await h.request("/auth/resend-verification", "POST", undefined, session);
+  expect((await verify()).status).toBe(200);
+});
+it("retains an ambiguous delivery token without automatically sending a duplicate", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.mocked(fetch).mockRejectedValueOnce(new Error("synthetic timeout"));
+  await create();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(h.db.prepare("SELECT count(*) n FROM account_tokens").get()!.n).toBe(
+    1,
+  );
+});
+it("does not verify another account through forged identity fields", async () => {
+  await create();
+  const other = await h.user("isolated@example.invalid");
+  await h.request("/auth/verify-email", "POST", {
+    token: token(links[0]),
+    user_id: other.id,
+  });
+  expect(
+    h.db
+      .prepare("SELECT email_verified_at FROM users WHERE id=?")
+      .get(other.id)!.email_verified_at,
+  ).toBe(null);
+  expect(
+    h.db
+      .prepare("SELECT email_verified_at FROM users WHERE email=?")
+      .get(signup.email)!.email_verified_at,
+  ).toBeTruthy();
 });

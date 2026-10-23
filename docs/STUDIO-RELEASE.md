@@ -71,3 +71,6 @@ Release candidate validation: 136 automated tests passed, both workspace type ch
 Production routing regression: the Vercel wildcard header rule applied to assets/API but not the static-export root document. An explicit source=/ rule now applies the same security headers to the root, covered by the configuration regression and verified through public production response checks. This does not change the API rewrite or canonical domain.
 
 Final recipient-integrity regression: professor email changes are rejected atomically once outreach exists; use a new professor record for a different address. Live review/history rows use the frozen transport recipient rather than a mutable professor join. This prevents edit/create races from misrepresenting an already snapshotted live recipient and leaves all send/approval/tenant guards intact.
+
+
+Updated transactional adapter, sender-verification configuration and activation instructions: [TRANSACTIONAL-EMAIL-RELEASE.md](TRANSACTIONAL-EMAIL-RELEASE.md). The newer MAIL_SENDER_VERIFIED=true operator attestation is also required.

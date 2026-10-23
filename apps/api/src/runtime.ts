@@ -4,6 +4,7 @@ export interface Env {
   MAIL_DELIVERY_ENABLED?: string;
   MAIL_FREE_PLAN_CONFIRMED?: string;
   MAIL_FROM?: string;
+  MAIL_SENDER_VERIFIED?: string;
   BREVO_API_KEY?: string;
   DOCUMENTS_KV?: KVNamespace;
   DOCUMENTS?: R2Bucket; // Optional legacy adapter, not a production dependency.

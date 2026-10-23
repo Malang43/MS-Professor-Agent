@@ -10,6 +10,10 @@ See [CAMPAIGN-AUTOMATION-RELEASE.md](docs/CAMPAIGN-AUTOMATION-RELEASE.md) for th
 
 The current owner has authorized restricted live activation for `raza1206896@gmail.com` and `muslim1206896@gmail.com`, with no email sent before approval of its exact content in the app. See [LIVE-GMAIL-ACTIVATION.md](docs/LIVE-GMAIL-ACTIVATION.md) for the current release and final steps. Normal production disables mock dispatch and simulation controls. Historical mock receipts never become real sends. Professor outreach requires the separate owner-only activation button after successful controlled deliveries and a detected reply. Preserve existing Groq configuration, Gmail credentials and production data. Earlier release reports below record their historical disabled-live state and do not override this release.
 
+## Transactional account email
+
+See [TRANSACTIONAL-EMAIL-RELEASE.md](docs/TRANSACTIONAL-EMAIL-RELEASE.md) for the tested branded verification/recovery adapter, atomic redemption and exact Brevo Free owner setup. Real account email remains disabled pending a verified sender, API key and genuine inbox certification. Existing Gmail outreach settings remain unchanged.
+
 ## Excel-to-Gmail automation verification
 
 See [EXCEL-GMAIL-VERIFICATION.md](docs/EXCEL-GMAIL-VERIFICATION.md) for the full Excel template, atomic import and retry behavior, inactive follow-up proposals, configurable 1-30 day delays (including 3), final reply checks, mailbox limits, verification and live-test boundaries. That report describes the earlier disabled-live release; the current restricted-live release is documented above.

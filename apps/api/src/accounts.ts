@@ -1,3 +1,9 @@
+import {
+  mailReady,
+  sendAccountLink,
+  sendPasswordChanged,
+} from "./account-mail";
+export { mailReady, sendAccountLink } from "./account-mail";
 import { revokeMailboxTokens } from "./oauth";
 import { z } from "zod";
 import { type Env, HttpError, hash, random, consume } from "./runtime";
@@ -9,20 +15,10 @@ const mail = z
   .max(254)
   .transform((v) => v.toLowerCase());
 const generic =
-  "If the account is eligible, a message will arrive when email delivery is configured. Check your inbox and spam folder.";
+  "If the account is eligible, a message has been requested. Check your inbox and spam folder.";
 const ok = () => Response.json({ ok: true, message: generic });
 const clear = (req: Request) =>
   `session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${new URL(req.url).protocol === "https:" ? "; Secure" : ""}`;
-export function mailReady(env: Env) {
-  return (
-    env.MAIL_DELIVERY_ENABLED === "true" &&
-    env.MAIL_FREE_PLAN_CONFIRMED === "true" &&
-    env.MAIL_PROVIDER === "brevo" &&
-    !!env.BREVO_API_KEY &&
-    !!env.MAIL_FROM &&
-    mail.safeParse(env.MAIL_FROM).success
-  );
-}
 async function limits(req: Request, env: Env, action: string, address: string) {
   const period = new Date().toISOString().slice(0, 13);
   await consume(env, `account:${action}:global`, 100, 1, period);
@@ -40,48 +36,6 @@ async function limits(req: Request, env: Env, action: string, address: string) {
     1,
     period,
   );
-}
-export async function sendAccountLink(
-  env: Env,
-  user: any,
-  purpose: "verify" | "reset",
-  network: typeof fetch = fetch,
-) {
-  if (!mailReady(env)) return;
-  const token = random(),
-    expires = Date.now() + (purpose === "verify" ? 86400000 : 1800000);
-  await env.DB.prepare(
-    "INSERT INTO account_tokens(token_hash,user_id,purpose,expires_at) VALUES(?,?,?,?)",
-  )
-    .bind(await hash(token), user.id, purpose, expires)
-    .run();
-  // A fragment keeps tokens out of HTTP URLs, proxy logs and referrers.
-  const link =
-    env.APP_ORIGIN + "/#" + purpose + "=" + encodeURIComponent(token);
-  try {
-    const response = await network("https://api.brevo.com/v3/smtp/email", {
-      method: "POST",
-      redirect: "manual",
-      signal: AbortSignal.timeout(10000),
-      headers: {
-        "api-key": env.BREVO_API_KEY!,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        sender: { email: env.MAIL_FROM, name: "MS Professor Outreach" },
-        to: [{ email: user.email }],
-        subject:
-          purpose === "verify"
-            ? "Verify your email address"
-            : "Reset your password",
-        textContent: `${purpose === "verify" ? "Confirm your email" : "Reset your password"} by opening this link and confirming in the application:\n${link}\nThis link expires ${purpose === "verify" ? "in 24 hours" : "in 30 minutes"} and can be used once. If you did not request it, ignore this message.`,
-      }),
-    });
-    if (!response.ok) console.warn("account_mail_failure", "provider_rejected");
-    await response.body?.cancel();
-  } catch {
-    console.warn("account_mail_failure", "transport_or_setup");
-  }
 }
 export async function accountPublic(
   req: Request,
@@ -148,7 +102,7 @@ export async function accountPublic(
         "SELECT id,email FROM users WHERE id=?",
       )
         .bind(id)
-        .first();
+        .first<{ id: string; email: string }>();
       if (created) await sendAccountLink(env, created, "verify");
     }
     return ok();
@@ -210,7 +164,7 @@ export async function accountPublic(
       "SELECT id,email FROM users WHERE email=?",
     )
       .bind(input.email)
-      .first();
+      .first<{ id: string; email: string }>();
     if (user) await sendAccountLink(env, user, "reset");
     return ok();
   }
@@ -237,42 +191,50 @@ export async function accountPublic(
     validPassword(input.password);
     password = await passwordHash(input.password);
   }
-  const claimed = await env.DB.prepare(
-    "DELETE FROM account_tokens WHERE token_hash=? AND purpose=? AND expires_at>? RETURNING user_id",
-  )
-    .bind(await hash(input.token), purpose, Date.now())
-    .first<any>();
-  if (!claimed)
+  const digest = await hash(input.token),
+    now = Date.now();
+  const lookup =
+    "SELECT user_id FROM account_tokens WHERE token_hash=? AND purpose=? AND expires_at>?";
+  // All effects and token consumption share one D1 transaction. A failure leaves
+  // the link usable; concurrent redemption cannot apply the operation twice.
+  const statements =
+    purpose === "verify"
+      ? [
+          env.DB.prepare(
+            `UPDATE users SET email_verified_at=COALESCE(email_verified_at,?) WHERE id=(${lookup})`,
+          ).bind(now, digest, purpose, now),
+        ]
+      : [
+          env.DB.prepare(
+            `UPDATE users SET password=? WHERE id=(${lookup})`,
+          ).bind(password, digest, purpose, now),
+          env.DB.prepare(`DELETE FROM sessions WHERE user_id=(${lookup})`).bind(
+            digest,
+            purpose,
+            now,
+          ),
+          env.DB.prepare(
+            `DELETE FROM oauth_states WHERE user_id=(${lookup})`,
+          ).bind(digest, purpose, now),
+        ];
+  const recipient =
+    purpose === "reset"
+      ? await env.DB.prepare(`SELECT id,email FROM users WHERE id=(${lookup})`)
+          .bind(digest, purpose, now)
+          .first<any>()
+      : null;
+  statements.push(
+    env.DB.prepare(
+      `DELETE FROM account_tokens WHERE user_id=(${lookup})${purpose === "verify" ? " AND purpose='verify'" : ""}`,
+    ).bind(digest, purpose, now),
+  );
+  const applied = await env.DB.batch(statements);
+  if (!applied[0].meta.changes)
     throw new HttpError(
       400,
       "This link is invalid, expired, or already used. Request a new link.",
     );
-  if (purpose === "verify")
-    await env.DB.batch([
-      env.DB.prepare("UPDATE users SET email_verified_at=? WHERE id=?").bind(
-        Date.now(),
-        claimed.user_id,
-      ),
-      env.DB.prepare(
-        "DELETE FROM account_tokens WHERE user_id=? AND purpose='verify'",
-      ).bind(claimed.user_id),
-    ]);
-  else
-    await env.DB.batch([
-      env.DB.prepare("UPDATE users SET password=? WHERE id=?").bind(
-        password,
-        claimed.user_id,
-      ),
-      env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(
-        claimed.user_id,
-      ),
-      env.DB.prepare("DELETE FROM oauth_states WHERE user_id=?").bind(
-        claimed.user_id,
-      ),
-      env.DB.prepare("DELETE FROM account_tokens WHERE user_id=?").bind(
-        claimed.user_id,
-      ),
-    ]);
+  if (recipient) await sendPasswordChanged(env, recipient);
   return Response.json(
     { ok: true },
     { headers: purpose === "reset" ? { "Set-Cookie": clear(req) } : {} },
