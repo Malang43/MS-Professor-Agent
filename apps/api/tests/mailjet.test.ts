@@ -209,3 +209,23 @@ it("does not certify an inactive sender or a different recipient", async () => {
   await certify(env, sender);
   expect(fetch).not.toHaveBeenCalled();
 });
+
+it("records only Mailjet's safe suspended-key error code on HTTP 401", async () => {
+  vi.mocked(fetch).mockResolvedValueOnce(
+    Response.json(
+      { ErrorCode: "mj-0001", ErrorMessage: "PRIVATE provider diagnostic" },
+      { status: 401 },
+    ),
+  );
+  await create();
+  expect(
+    h.db
+      .prepare(
+        "SELECT entity_id FROM audit WHERE action='account.mail.verify.rejected'",
+      )
+      .get()!.entity_id,
+  ).toBe("mailjet:mj-0001");
+  expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain(
+    "PRIVATE",
+  );
+});

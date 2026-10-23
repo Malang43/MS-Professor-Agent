@@ -138,6 +138,21 @@ async function deliver(
       if (message.To?.length !== 1 || !providerId || !message.To[0].MessageUUID)
         throw new Error("Ambiguous account delivery");
     }
+  } else if (
+    mailjet &&
+    !accepted &&
+    response.status >= 400 &&
+    response.status < 500
+  ) {
+    // Retain only documented error codes, never provider text/links/credentials.
+    try {
+      const error = (await response.json()) as any;
+      const code =
+        error.ErrorCode || error.Messages?.[0]?.Errors?.[0]?.ErrorCode;
+      if (/^(mj|send)-[a-z0-9-]{1,32}$/i.test(code || "")) failureCode = code;
+    } catch {
+      /* HTTP status remains the safe diagnostic. */
+    }
   } else await response.body?.cancel();
   if (!accepted) console.warn("account_mail_failure", "provider_rejected");
   return { accepted, providerId, failureCode };
