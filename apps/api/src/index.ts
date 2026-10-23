@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { recordAction } from "./records";
 import { approveGmail, retryGmail } from "./live-approval";
 import {
   isLiveOwner,
@@ -196,6 +197,8 @@ async function route(req: Request, env: Env): Promise<Response> {
   const privateAccount = await accountPrivate(req, env, user);
   if (privateAccount) return privateAccount;
   await requireVerified(env, user);
+  const recordResponse = await recordAction(req, env, user, path, method);
+  if (recordResponse) return recordResponse;
   if (path === "/api/outreach/mode" && method === "POST") {
     const input = z
       .object({ production_enabled: z.boolean(), confirmed: z.literal(true) })
@@ -282,7 +285,7 @@ async function route(req: Request, env: Env): Promise<Response> {
     await owned(env, "messages", cancelAutomation[1], user);
     await env.DB.batch([
       env.DB.prepare(
-        "UPDATE automation SET generated=1 WHERE message_id=?",
+        "UPDATE automation SET generated=1,cancel_reason=COALESCE(cancel_reason,'manual') WHERE message_id=?",
       ).bind(cancelAutomation[1]),
       env.DB.prepare(
         "UPDATE messages SET status='cancelled' WHERE parent_id=? AND user_id=? AND status IN ('draft','pending')",
@@ -305,7 +308,9 @@ async function route(req: Request, env: Env): Promise<Response> {
         env.DB.prepare("SELECT * FROM profiles WHERE user_id=?")
           .bind(user)
           .first(),
-        env.DB.prepare("SELECT * FROM professors WHERE user_id=? ORDER BY name")
+        env.DB.prepare(
+          "SELECT * FROM professors WHERE user_id=? AND deleted_at IS NULL ORDER BY name",
+        )
           .bind(user)
           .all(),
         env.DB.prepare(
@@ -314,7 +319,7 @@ async function route(req: Request, env: Env): Promise<Response> {
           .bind(user, Date.now())
           .all(),
         env.DB.prepare(
-          "SELECT m.*,p.name professor_name,COALESCE(CASE WHEN json_valid(t.snapshot) THEN json_extract(t.snapshot,'$.recipient') END,m.approved_recipient,p.email) professor_email FROM messages m JOIN professors p ON p.id=m.professor_id LEFT JOIN transports t ON t.message_id=m.id WHERE m.user_id=? ORDER BY m.created_at DESC",
+          "SELECT m.*,CASE WHEN a.message_id IS NOT NULL AND a.generated=0 THEN json_object('days',a.days,'subject',a.subject,'body',a.body) END effective_followup,p.name professor_name,COALESCE(CASE WHEN json_valid(t.snapshot) THEN json_extract(t.snapshot,'$.recipient') END,m.approved_recipient,p.email) professor_email FROM messages m JOIN professors p ON p.id=m.professor_id LEFT JOIN transports t ON t.message_id=m.id LEFT JOIN automation a ON a.message_id=m.id WHERE m.user_id=? ORDER BY m.created_at DESC",
         )
           .bind(user)
           .all(),
@@ -340,6 +345,7 @@ async function route(req: Request, env: Env): Promise<Response> {
       documents: documents.results,
       messages: messages.results.map((m) => ({
         ...m,
+        followup_proposal: m.followup_proposal || m.effective_followup || null,
         attachments: attachments.results
           .filter((a) => a.message_id === m.id)
           .map((a) => a.document_id),
@@ -379,7 +385,7 @@ async function route(req: Request, env: Env): Promise<Response> {
       ).results,
       automation: (
         await env.DB.prepare(
-          "SELECT a.* FROM automation a JOIN messages m ON m.id=a.message_id WHERE m.user_id=?",
+          "SELECT a.*,m.sent_at,m.status initial_status,m.professor_id,child.id followup_id,child.status child_status,ct.state child_transport_state,ct.provider_id followup_provider_id,t.provider_id initial_provider_id,s.reason suppression_reason FROM automation a JOIN messages m ON m.id=a.message_id LEFT JOIN transports t ON t.message_id=m.id LEFT JOIN messages child ON child.parent_id=m.id LEFT JOIN transports ct ON ct.message_id=child.id LEFT JOIN suppressions s ON s.user_id=m.user_id AND s.address=lower(COALESCE(json_extract(t.snapshot,'$.recipient'),m.approved_recipient)) WHERE m.user_id=?",
         )
           .bind(user)
           .all()
@@ -401,6 +407,20 @@ async function route(req: Request, env: Env): Promise<Response> {
       delivery_attempts: (
         await env.DB.prepare(
           "SELECT a.* FROM delivery_attempts a JOIN messages m ON m.id=a.message_id WHERE m.user_id=? ORDER BY a.started_at DESC LIMIT 100",
+        )
+          .bind(user)
+          .all()
+      ).results,
+      authorizations: (
+        await env.DB.prepare(
+          "SELECT * FROM message_authorizations WHERE user_id=? ORDER BY authorized_at DESC",
+        )
+          .bind(user)
+          .all()
+      ).results,
+      campaigns: (
+        await env.DB.prepare(
+          "SELECT id,approved_at,initial_count,followup_count,sending_account_id FROM campaign_approvals WHERE user_id=? ORDER BY approved_at DESC",
         )
           .bind(user)
           .all()
@@ -432,7 +452,9 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
   const professorEdit = path.match(/^\/api\/professors\/([^/]+)$/);
   if (professorEdit && method === "PUT") {
-    await owned(env, "professors", professorEdit[1], user);
+    const editable = await owned(env, "professors", professorEdit[1], user);
+    if (editable.deleted_at)
+      throw new HttpError(409, "Deleted professor details cannot be edited.");
     const input = professorSchema.parse(await req.json());
     const duplicate = await env.DB.prepare(
       "SELECT id FROM professors WHERE user_id=? AND email=? AND id!=?",
@@ -569,7 +591,7 @@ async function route(req: Request, env: Env): Promise<Response> {
       input.map(async (row, i) => {
         let draft;
         try {
-          draft = spreadsheetDraft(row, i);
+          draft = spreadsheetDraft(row, i, true);
         } catch (error) {
           throw new HttpError(400, (error as Error).message);
         }
@@ -601,8 +623,8 @@ async function route(req: Request, env: Env): Promise<Response> {
         ON CONFLICT(user_id,email) DO NOTHING`,
       ).bind(user, payload),
       env.DB.prepare(
-        `INSERT INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone,followup_proposal,import_key,approved_recipient)
-        SELECT json_extract(j.value,'$.id'),?,p.id,json_extract(j.value,'$.subject'),json_extract(j.value,'$.body'),'manual',0,0,'draft',json_extract(j.value,'$.scheduled_at'),json_extract(j.value,'$.timezone'),json_extract(j.value,'$.followup_proposal'),json_extract(j.value,'$.import_key'),json_extract(j.value,'$.email')
+        `INSERT INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone,followup_proposal,import_key,approved_recipient,followup_issue,followup_draft)
+        SELECT json_extract(j.value,'$.id'),?,p.id,json_extract(j.value,'$.subject'),json_extract(j.value,'$.body'),'manual',0,0,'draft',json_extract(j.value,'$.scheduled_at'),json_extract(j.value,'$.timezone'),json_extract(j.value,'$.followup_proposal'),json_extract(j.value,'$.import_key'),json_extract(j.value,'$.email'),json_extract(j.value,'$.followup_issue'),json_extract(j.value,'$.followup_draft')
         FROM json_each(?) j JOIN professors p ON p.user_id=? AND p.email=json_extract(j.value,'$.email')
         WHERE NOT EXISTS(SELECT 1 FROM messages m WHERE m.user_id=p.user_id AND m.professor_id=p.id AND m.subject=json_extract(j.value,'$.subject') AND m.body=json_extract(j.value,'$.body') AND m.scheduled_at=json_extract(j.value,'$.scheduled_at'))
         ON CONFLICT(user_id,import_key) WHERE import_key IS NOT NULL DO NOTHING`,
@@ -620,6 +642,11 @@ async function route(req: Request, env: Env): Promise<Response> {
         "Save the draft, then approve its exact content in Review before scheduling.",
       );
     const recipient = await owned(env, "professors", m.professor_id, user);
+    if (recipient.deleted_at || recipient.archived_at)
+      throw new HttpError(
+        409,
+        "Restore an archived professor before creating mail; deleted professors cannot receive mail.",
+      );
     for (const attachment of m.attachments)
       await readyDocument(env, user, attachment);
     await consume(env, `messages:${user}`, 50);

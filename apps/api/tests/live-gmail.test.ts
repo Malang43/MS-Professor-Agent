@@ -1,7 +1,12 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { harness } from "./harness";
 import { encrypt } from "../src/oauth";
-import { runLiveJobs, queueFollowups, syncReplies } from "../src/automation";
+import {
+  runLiveJobs,
+  queueFollowups,
+  syncReplies,
+  transportSnapshot,
+} from "../src/automation";
 import { runJobs } from "../src/index";
 import { checkGmail } from "../src/live-controls";
 let h: ReturnType<typeof harness>,
@@ -186,8 +191,24 @@ describe("real Gmail production workflow", () => {
   });
   it("prevents replay of historical approved live rows and mock rows until fresh approval", async () => {
     const [draft] = await importRows();
-    expect((await approve([draft.id])).status).toBe(200);
-    h.db.prepare("UPDATE messages SET live_ready=0").run();
+    const snapshot = await transportSnapshot(
+      h.env,
+      owner.id,
+      connection,
+      recipient,
+      draft.subject,
+      draft.body,
+      [],
+      draft.id,
+    );
+    h.db
+      .prepare(
+        "INSERT INTO transports(message_id,user_id,connection_id,snapshot) VALUES(?,?,?,?)",
+      )
+      .run(draft.id, owner.id, connection, JSON.stringify(snapshot));
+    h.db
+      .prepare("UPDATE messages SET status='pending',approved=1,live_ready=0")
+      .run();
     const network = send();
     await runJobs(h.env);
     await runLiveJobs(h.env, network as any);

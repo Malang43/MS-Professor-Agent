@@ -107,6 +107,7 @@ export async function transportSnapshot(
 }
 async function receipt(env: Env, row: any, result: Receipt) {
   if (!result.id) return;
+  const acceptedAt = result.acceptedAt || new Date().toISOString();
   await env.DB.batch([
     env.DB.prepare(
       "INSERT OR IGNORE INTO deliveries(message_id,provider,provider_id) VALUES(?,?,?)",
@@ -119,7 +120,10 @@ async function receipt(env: Env, row: any, result: Receipt) {
     ).bind(result.id, result.threadId, Date.now() + 300000, row.message_id),
     env.DB.prepare(
       "UPDATE messages SET status='sent',sent_at=? WHERE id=? AND status='pending'",
-    ).bind(new Date().toISOString(), row.message_id),
+    ).bind(acceptedAt, row.message_id),
+    env.DB.prepare(
+      "UPDATE automation SET due_at=?+days*86400000 WHERE message_id=? AND due_at IS NULL",
+    ).bind(Date.parse(acceptedAt), row.message_id),
     env.DB.prepare(
       "INSERT INTO audit(id,user_id,action,entity_id) VALUES(?,?,'provider.sent_confirmed',?)",
     ).bind(crypto.randomUUID(), row.user_id, row.message_id),
@@ -164,7 +168,7 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
     .bind(now)
     .run();
   const rows = await env.DB.prepare(
-    `SELECT t.*,c.provider,c.address,c.subject AS account_subject,c.status AS account_status,c.scopes,c.tokens,c.expires_at,c.refresh_until,c.refresh_lease,m.status AS message_status,m.parent_id FROM transports t JOIN messages m ON m.id=t.message_id JOIN connections c ON c.id=t.connection_id JOIN profiles p ON p.user_id=t.user_id WHERE t.state IN ('waiting','uncertain') AND t.next_at<=? AND ((t.state='uncertain') OR (?=1 AND m.status='pending' AND m.live_ready=1 AND m.approved=1 AND (m.mode!='auto' OR m.authorized=1) AND m.scheduled_at<=? AND p.paused=0 AND p.stopped=0)) ORDER BY t.next_at,t.message_id LIMIT 1`,
+    `SELECT t.*,c.provider,c.address,c.subject AS account_subject,c.status AS account_status,c.scopes,c.tokens,c.expires_at,c.refresh_until,c.refresh_lease,m.status AS message_status,m.parent_id FROM transports t JOIN messages m ON m.id=t.message_id JOIN connections c ON c.id=t.connection_id JOIN profiles p ON p.user_id=t.user_id WHERE t.state IN ('waiting','uncertain') AND t.next_at<=? AND ((t.state='uncertain') OR (?=1 AND m.status='pending' AND m.live_ready=1 AND NOT EXISTS(SELECT 1 FROM professors pr WHERE pr.id=m.professor_id AND pr.deleted_at IS NOT NULL) AND m.approved=1 AND (m.mode!='auto' OR m.authorized=1) AND m.scheduled_at<=? AND p.paused=0 AND p.stopped=0)) ORDER BY t.next_at,t.message_id LIMIT 1`,
   )
     .bind(now, +maySend, new Date().toISOString())
     .all<any>();
@@ -298,7 +302,7 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
       }
       // Last D1 fence before the external side effect; do not trust stale approval/account state.
       const fenced = await env.DB.prepare(
-        `UPDATE transports SET state='submitting',attempts=attempts+1 WHERE message_id=? AND lease=? AND state='leased' AND EXISTS(SELECT 1 FROM messages m JOIN profiles p ON p.user_id=m.user_id JOIN connections c ON c.id=? WHERE m.id=? AND m.status='pending' AND m.live_ready=1 AND m.approved=1 AND (m.mode!='auto' OR m.authorized=1) AND p.paused=0 AND p.stopped=0 AND c.status='connected') AND NOT EXISTS(SELECT 1 FROM suppressions WHERE user_id=? AND address=?) RETURNING message_id`,
+        `UPDATE transports SET state='submitting',attempts=attempts+1 WHERE message_id=? AND lease=? AND state='leased' AND EXISTS(SELECT 1 FROM messages m JOIN profiles p ON p.user_id=m.user_id JOIN connections c ON c.id=? WHERE m.id=? AND m.status='pending' AND m.live_ready=1 AND NOT EXISTS(SELECT 1 FROM professors pr WHERE pr.id=m.professor_id AND pr.deleted_at IS NOT NULL) AND m.approved=1 AND (m.mode!='auto' OR m.authorized=1) AND p.paused=0 AND p.stopped=0 AND c.status='connected') AND NOT EXISTS(SELECT 1 FROM suppressions WHERE user_id=? AND address=?) RETURNING message_id`,
       )
         .bind(
           row.message_id,
@@ -558,8 +562,10 @@ export async function syncReplies(
 export async function queueFollowups(env: Env) {
   if (!liveEnabled(env)) return;
   const rows = await env.DB.prepare(
-    `SELECT a.*,m.user_id,m.professor_id,m.timezone,m.sent_at,t.connection_id,t.thread_id,t.snapshot,c.status AS account_status,c.scopes FROM automation a JOIN messages m ON m.id=a.message_id JOIN transports t ON t.message_id=m.id JOIN connections c ON c.id=t.connection_id JOIN profiles p ON p.user_id=m.user_id WHERE a.generated=0 AND m.live_ready=1 AND m.parent_id IS NULL AND m.status='sent' AND p.paused=0 AND p.stopped=0 AND c.status='connected' AND t.sync_checked_at>unixepoch()*1000-60000 AND t.sync_cursor IS NULL AND julianday(m.sent_at)+a.days<=julianday('now') LIMIT 1`,
-  ).all<any>();
+    `SELECT a.*,m.user_id,m.professor_id,m.timezone,m.sent_at,t.connection_id,t.thread_id,t.snapshot,c.status AS account_status,c.scopes FROM automation a JOIN messages m ON m.id=a.message_id JOIN transports t ON t.message_id=m.id JOIN connections c ON c.id=t.connection_id JOIN profiles p ON p.user_id=m.user_id WHERE a.generated=0 AND NOT EXISTS(SELECT 1 FROM professors pr WHERE pr.id=m.professor_id AND pr.deleted_at IS NOT NULL) AND m.live_ready=1 AND m.parent_id IS NULL AND m.status='sent' AND p.paused=0 AND p.stopped=0 AND c.status='connected' AND t.sync_checked_at>? AND t.sync_cursor IS NULL AND COALESCE(a.due_at,CAST((julianday(m.sent_at)-2440587.5)*86400000 AS INTEGER)+a.days*86400000)<=? LIMIT 1`,
+  )
+    .bind(Date.now() - 60000, Date.now())
+    .all<any>();
   for (const row of rows.results) {
     const snapshot = JSON.parse(row.snapshot) as Snapshot;
     if (
@@ -592,7 +598,9 @@ export async function queueFollowups(env: Env) {
       continue;
     }
     const id = crypto.randomUUID(),
-      now = new Date().toISOString(),
+      now = new Date(
+        row.due_at ?? Date.parse(row.sent_at) + row.days * 86400000,
+      ).toISOString(),
       next = {
         ...snapshot,
         subject: row.subject,
@@ -622,6 +630,9 @@ export async function queueFollowups(env: Env) {
         env.DB.prepare(
           "INSERT INTO transports(message_id,user_id,connection_id,snapshot) SELECT id,user_id,?,? FROM messages WHERE id=?",
         ).bind(row.connection_id, JSON.stringify(next), id),
+        env.DB.prepare(
+          "INSERT INTO message_authorizations(message_id,user_id,campaign_id,kind,parent_id,snapshot,authorized_at,followup_authorized) SELECT m.id,m.user_id,a.campaign_id,'followup',?,json_object('initial',json(?),'sending_account_id',?,'scheduled_at',m.scheduled_at,'timezone',m.timezone,'parent_authorization',a.message_id,'followup',NULL,'condition','only_if_no_reply','maximum_followups',0),a.authorized_at,0 FROM messages m JOIN message_authorizations a ON a.message_id=m.parent_id WHERE m.id=? AND a.followup_authorized=1",
+        ).bind(row.message_id, JSON.stringify(next), row.connection_id, id),
         ...snapshot.attachments.map((doc) =>
           env.DB.prepare(
             "INSERT INTO message_attachments(message_id,document_id,user_id) SELECT id,?,user_id FROM messages WHERE id=?",

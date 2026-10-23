@@ -16,7 +16,11 @@ export type Envelope = {
   inReplyTo?: string;
   attachments: Attachment[];
 };
-export type Receipt = { id: string | null; threadId: string | null };
+export type Receipt = {
+  id: string | null;
+  threadId: string | null;
+  acceptedAt?: string;
+};
 export type MailEvent = {
   id: string;
   sender: string;
@@ -324,7 +328,16 @@ export function emailProvider(
           true,
         );
         if (!result.id) throw new ProviderError("uncertain");
-        return { id: result.id, threadId: result.threadId || null };
+        return {
+          id: result.id,
+          threadId: result.threadId || null,
+          ...(Number.isFinite(Number(result.internalDate)) &&
+          Number(result.internalDate) > 0
+            ? {
+                acceptedAt: new Date(Number(result.internalDate)).toISOString(),
+              }
+            : {}),
+        };
       },
       async reconcile(access, key) {
         const rows = await request(
@@ -337,7 +350,16 @@ export function emailProvider(
           `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(rows.messages[0].id)}?format=metadata`,
           access,
         );
-        return { id: result.id, threadId: result.threadId || null };
+        return {
+          id: result.id,
+          threadId: result.threadId || null,
+          ...(Number.isFinite(Number(result.internalDate)) &&
+          Number(result.internalDate) > 0
+            ? {
+                acceptedAt: new Date(Number(result.internalDate)).toISOString(),
+              }
+            : {}),
+        };
       },
       async replies(access, thread) {
         const result = await request(

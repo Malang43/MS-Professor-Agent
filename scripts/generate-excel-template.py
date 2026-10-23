@@ -5,7 +5,7 @@ from zipfile import ZipFile, ZIP_DEFLATED, ZipInfo
 import csv
 
 root = Path(__file__).resolve().parents[1]
-columns = ["name", "email", "university", "interests", "subject", "body", "scheduled_at", "timezone", "followup_days", "followup_subject", "followup_body"]
+columns = ["name", "email", "university", "interests", "subject", "body", "scheduled_at", "timezone", "follow_up_days", "follow_up_subject", "follow_up_body"]
 example = ["Synthetic Professor", "controlled@example.com", "Example University", "Robotics and machine learning", "MS research inquiry - sample only", "Dear Professor,\nThis is synthetic sample content. Replace and review before approving.", "2099-01-01T12:00:00Z", "Asia/Karachi", "3", "Follow-up - sample only", "Dear Professor,\nFollowing up on my research inquiry. Thank you for your time."]
 notes = [
     ["Instructions"],
@@ -15,12 +15,12 @@ notes = [
     ["scheduled_at must be UTC ISO TEXT, for example 2099-01-01T12:00:00Z. Do not use an Excel date cell."],
     ["timezone is an IANA display timezone (default Asia/Karachi); it does not change the UTC timestamp."],
     ["interests contains professor research details. Subject/body support multiline text."],
-    ["followup_days is optional, integer 1-30 elapsed days after confirmed delivery; 3 is supported."],
-    ["Provide all three followup columns together, or leave all three blank."],
-    ["Follow-ups import as INACTIVE proposals. Spreadsheet authorization columns are ignored."],
-    ["In Outreach review exact recipients/content, select Gmail and explicitly authorize any displayed follow-up proposals."],
-    ["Import never approves or sends. Approve and schedule specified messages separately (up to 10 per approval)."],
-    ["Controlled live testing remains restricted to owner-authorized test addresses until owner production activation."],
+    ["follow_up_days is an integer 1-30 elapsed days after actual Gmail acceptance. Legacy followup_days is also supported."],
+    ["Provide follow_up_days, follow_up_subject and follow_up_body together. Legacy followup_* columns remain supported; conflicting aliases are rejected."],
+    ["Missing follow-up content is marked in review and cannot be authorized. Spreadsheet authorization columns are ignored."],
+    ["Select all campaign drafts, review exact initial and follow-up content, select Gmail, then choose Approve initial emails and automatic follow-ups."],
+    ["One campaign approval can authorize up to 25 initial emails plus one exact conditional follow-up per initial. No later approval is required."],
+    ["Existing owner-controlled sending restrictions still apply. This template never activates sending or changes approved recipients."],
     ["Replies, declines, opt-outs and bounces stop tracked pending follow-ups. Reply access is required."],
     ["Retries skip matching recipient/content/UTC schedule; import errors save no professors or drafts."],
 ]

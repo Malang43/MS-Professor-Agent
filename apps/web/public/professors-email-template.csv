@@ -1,4 +1,4 @@
-name,email,university,interests,subject,body,scheduled_at,timezone,followup_days,followup_subject,followup_body
+name,email,university,interests,subject,body,scheduled_at,timezone,follow_up_days,follow_up_subject,follow_up_body
 Synthetic Professor,controlled@example.com,Example University,Robotics and machine learning,MS research inquiry - sample only,"Dear Professor,
 This is synthetic sample content. Replace and review before approving.",2099-01-01T12:00:00Z,Asia/Karachi,3,Follow-up - sample only,"Dear Professor,
 Following up on my research inquiry. Thank you for your time."

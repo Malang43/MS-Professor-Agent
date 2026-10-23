@@ -101,8 +101,8 @@ describe("Excel-to-outbox import", () => {
     });
     expect(JSON.parse(state.messages[0].followup_proposal)).toEqual({
       days: 3,
-      subject: data.followup_subject,
-      body: data.followup_body,
+      subject: data.follow_up_subject || data.followup_subject,
+      body: data.follow_up_body || data.followup_body,
     });
     expect(state.automation).toEqual([]);
     expect(state.transports).toEqual([]);
@@ -194,7 +194,6 @@ describe("Excel-to-outbox import", () => {
     { followup_days: "0" },
     { followup_days: "31" },
     { followup_days: "3.5" },
-    { followup_body: "" },
     { scheduled_at: "2099-02-30T12:00:00Z" },
     { scheduled_at: "2099-01-01 12:00" },
     { timezone: "invalid/zone" },

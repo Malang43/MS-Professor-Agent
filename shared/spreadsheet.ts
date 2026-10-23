@@ -9,15 +9,26 @@ export type SpreadsheetDraft = {
   scheduled_at: string;
   timezone: string;
   followup_proposal?: FollowupProposal;
+  followup_issue?: string;
+  followup_draft?: { days?: number; subject: string; body: string };
 };
 
 export function spreadsheetDraft(
   row: Record<string, string>,
   index: number,
+  allowIncompleteFollowup = false,
 ): SpreadsheetDraft {
   const fail = (message: string): never => {
     throw new Error(`Row ${index + 2}: ${message}`);
   };
+  row = { ...row };
+  for (const field of ["days", "subject", "body"]) {
+    const oldValue = row["followup_" + field]?.trim(),
+      newValue = row["follow_up_" + field]?.trim();
+    if (oldValue && newValue && oldValue !== newValue)
+      fail("conflicting followup_ and follow_up_ columns: " + field);
+    row["followup_" + field] = newValue || oldValue || "";
+  }
   const subject = row.subject?.trim() || "",
     body = row.body?.trim() || "";
   if (
@@ -48,24 +59,40 @@ export function spreadsheetDraft(
     fail("invalid IANA timezone.");
   }
   let followup_proposal: FollowupProposal | undefined;
+  let followup_issue: string | undefined,
+    followup_draft: SpreadsheetDraft["followup_draft"];
   if (row.followup_days || row.followup_subject || row.followup_body) {
     const days = Number(row.followup_days),
       subject = row.followup_subject?.trim() || "",
       body = row.followup_body?.trim() || "";
     if (
-      !Number.isInteger(days) ||
-      days < 1 ||
-      days > 30 ||
-      !subject ||
+      (row.followup_days &&
+        (!Number.isInteger(days) || days < 1 || days > 30)) ||
       subject.length > 500 ||
       /[\r\n]/.test(subject) ||
-      !body ||
       body.length > 20000
     )
       fail(
-        "follow-up requires an integer delay of 1-30 days, subject and body.",
+        "follow-up requires an integer delay of 1-30 days, a single-line subject and a body up to 20000 characters.",
       );
-    followup_proposal = { days, subject, body };
+    if (!row.followup_days || !subject || !body) {
+      followup_issue =
+        "Missing follow-up " +
+        [
+          !row.followup_days ? "delay" : "",
+          !subject ? "subject" : "",
+          !body ? "body" : "",
+        ]
+          .filter(Boolean)
+          .join(", ") +
+        "; automatic follow-up cannot be authorized.";
+      if (!allowIncompleteFollowup) fail(followup_issue);
+      followup_draft = {
+        ...(row.followup_days ? { days } : {}),
+        subject,
+        body,
+      };
+    } else followup_proposal = { days, subject, body };
   }
   // Spreadsheet authorization flags are never accepted.
   return {
@@ -78,5 +105,6 @@ export function spreadsheetDraft(
     scheduled_at: new Date(date).toISOString(),
     timezone,
     ...(followup_proposal ? { followup_proposal } : {}),
+    ...(followup_issue ? { followup_issue, followup_draft } : {}),
   };
 }

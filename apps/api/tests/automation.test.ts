@@ -97,30 +97,42 @@ function makeDue() {
 }
 describe("bounded reliable live-test outbox", () => {
   it("supports a three-day authorized follow-up, never earlier, after a complete reply check", async () => {
-    const a = await setup("gmail", true, 3);
-    await runLiveJobs(h.env, (async () =>
-      Response.json({ id: "sent", threadId: "thread" })) as any);
-    h.db
-      .prepare("UPDATE messages SET sent_at=? WHERE id=?")
-      .run(new Date(Date.now() - 2 * 86400000).toISOString(), a.message);
-    makeDue();
-    await syncReplies(h.env, (async () =>
-      Response.json({ messages: [] })) as any);
-    await queueFollowups(h.env);
-    expect(
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const start = Date.now(),
+        a = await setup("gmail", true, 3);
       h.db
-        .prepare("SELECT count(*) n FROM messages WHERE parent_id IS NOT NULL")
-        .get()!.n,
-    ).toBe(0);
-    h.db
-      .prepare("UPDATE messages SET sent_at=? WHERE id=?")
-      .run(new Date(Date.now() - 3 * 86400000 - 1000).toISOString(), a.message);
-    await queueFollowups(h.env);
-    expect(
-      h.db
-        .prepare("SELECT count(*) n FROM messages WHERE parent_id IS NOT NULL")
-        .get()!.n,
-    ).toBe(1);
+        .prepare("UPDATE connections SET expires_at=?")
+        .run(start + 10 * 86400000);
+      await runLiveJobs(h.env, (async () =>
+        Response.json({ id: "sent", threadId: "thread" })) as any);
+      vi.setSystemTime(start + 2 * 86400000);
+      makeDue();
+      await syncReplies(h.env, (async () =>
+        Response.json({ messages: [] })) as any);
+      await queueFollowups(h.env);
+      expect(
+        h.db
+          .prepare(
+            "SELECT count(*) n FROM messages WHERE parent_id IS NOT NULL",
+          )
+          .get()!.n,
+      ).toBe(0);
+      vi.setSystemTime(start + 3 * 86400000 + 1000);
+      makeDue();
+      await syncReplies(h.env, (async () =>
+        Response.json({ messages: [] })) as any);
+      await queueFollowups(h.env);
+      expect(
+        h.db
+          .prepare(
+            "SELECT count(*) n FROM messages WHERE parent_id IS NOT NULL",
+          )
+          .get()!.n,
+      ).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("requires explicit follow-up authorization and accepts only delays within the configured range", async () => {
     const a = await setup();
@@ -393,7 +405,11 @@ describe("reply-driven follow-up safety", () => {
   async function sent() {
     const a = await setup("gmail", true);
     await runLiveJobs(h.env, (async () =>
-      Response.json({ id: "sent", threadId: "thread" })) as any);
+      Response.json({
+        id: "sent",
+        threadId: "thread",
+        internalDate: String(Date.now() - 8 * 86400000),
+      })) as any);
     h.db
       .prepare("UPDATE messages SET sent_at=?")
       .run(new Date(Date.now() - 8 * 86400000).toISOString());

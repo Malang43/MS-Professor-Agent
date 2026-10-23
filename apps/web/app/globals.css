@@ -2157,3 +2157,20 @@ hr {
 .checkbox-label a {
   text-decoration: underline;
 }
+
+/* Campaign and record actions remain readable on narrow screens. */
+.record-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+.campaign-summary {
+  padding: 1rem;
+  margin: 1rem 0;
+  border: 1px solid currentColor;
+  border-radius: 0.75rem;
+}
+.campaign-summary p {
+  margin: 0.5rem 0 0;
+}

@@ -2,6 +2,10 @@
 
 Prepared 2026-10-21 for private repository `Malang43/MS-Professor-Agent`. The mock-default application was deployed with explicit authorization on 2026-10-21. See [the production deployment report](docs/DEPLOYMENT-STATUS.md) for live URLs, resource IDs, verification results, and remaining tasks. Default production uses **Vercel Hobby + Workers Free + D1 Free + Workers KV Free**. No card, trial, paid upgrade, R2 subscription, purchased domain or real professor outreach is authorized. If an account/setup step requires payment details or an ineligible plan, stop that step and report it. No unlimited free usage is promised.
 
+## One-time campaign approval and automatic follow-ups
+
+See [CAMPAIGN-AUTOMATION-RELEASE.md](docs/CAMPAIGN-AUTOMATION-RELEASE.md) for the October 23 release: one Excel upload, full campaign review, one explicit approval of initial emails plus their exact conditional follow-ups, immutable authorizations, actual due times and safe archive/delete/remove actions. Existing Gmail delivery and reply detection are preserved. No real email is sent during release verification; earlier reports below describe their historical releases.
+
 ## Real Gmail activation
 
 The current owner has authorized restricted live activation for `raza1206896@gmail.com` and `muslim1206896@gmail.com`, with no email sent before approval of its exact content in the app. See [LIVE-GMAIL-ACTIVATION.md](docs/LIVE-GMAIL-ACTIVATION.md) for the current release and final steps. Normal production disables mock dispatch and simulation controls. Historical mock receipts never become real sends. Professor outreach requires the separate owner-only activation button after successful controlled deliveries and a detected reply. Preserve existing Groq configuration, Gmail credentials and production data. Earlier release reports below record their historical disabled-live state and do not override this release.

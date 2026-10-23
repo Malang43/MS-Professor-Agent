@@ -59,6 +59,7 @@ type Profile = {
   stopped: number;
 };
 type Professor = {
+  archived_at?: number | null;
   source_url?: string | null;
   verified_at?: number | null;
   id: string;
@@ -77,6 +78,10 @@ type Message = {
   body: string;
   mode: string;
   status: string;
+  archived_at?: number | null;
+  hidden_at?: number | null;
+  followup_issue?: string | null;
+  followup_draft?: string | null;
   approved?: number;
   live_ready?: number;
   parent_id?: string | null;
@@ -123,6 +128,16 @@ type State = {
     subject: string;
     body: string;
     generated: number;
+    due_at?: number | null;
+    cancel_reason?: string | null;
+    sent_at?: string | null;
+    initial_status?: string;
+    initial_provider_id?: string | null;
+    followup_id?: string | null;
+    child_status?: string | null;
+    child_transport_state?: string | null;
+    followup_provider_id?: string | null;
+    suppression_reason?: string | null;
   }[];
   transports: {
     message_id: string;
@@ -209,6 +224,7 @@ export default function Home() {
     ),
     [review, setReview] = useState<Message | null>(null),
     [selected, setSelected] = useState<string[]>([]);
+  const [recordFilter, setRecordFilter] = useState("active");
   const [approvalAccount, setApprovalAccount] = useState("");
   const [authorizeImportedFollowups, setAuthorizeImportedFollowups] =
     useState(false);
@@ -485,7 +501,7 @@ export default function Home() {
         throw new Error(
           "Import at most 25 fully specified draft emails at once. Professor-only imports still support 500 rows.",
         );
-      rows.forEach((row, i) => spreadsheetDraft(row, i));
+      rows.forEach((row, i) => spreadsheetDraft(row, i, true));
       const result = await request("/imports/drafts", "POST", rows);
       setNotice(
         `${result.created} drafts prepared; ${result.skipped} matching drafts skipped. Review recipients, choose Gmail, and approve separately. Follow-up proposals remain inactive until authorized.`,
@@ -507,8 +523,16 @@ export default function Home() {
     );
   }
 
-  const messages = state?.messages || [],
-    professors = state?.professors || [];
+  const visibleRecord = (r: {
+    archived_at?: number | null;
+    hidden_at?: number | null;
+  }) =>
+    recordFilter === "all" ||
+    (recordFilter === "archived"
+      ? !!r.archived_at && !r.hidden_at
+      : !r.archived_at && !r.hidden_at);
+  const messages = (state?.messages || []).filter(visibleRecord),
+    professors = (state?.professors || []).filter(visibleRecord);
   const filtered = messages.filter(
     (m) =>
       (statusFilter === "all" || m.status === statusFilter) &&
@@ -517,7 +541,10 @@ export default function Home() {
         .includes(query.toLowerCase()),
   );
   const followups = messages.filter(
-    (m) => m.followup_at && m.status === "sent",
+    (m) =>
+      m.followup_at &&
+      m.status === "sent" &&
+      !state?.automation.some((a) => a.message_id === m.id),
   );
   const counts = {
     sent: messages.filter(
@@ -655,17 +682,49 @@ export default function Home() {
             : "Controlled testing only: " +
               state.capabilities.test_recipients.join(", ")}
           . Approval schedules real delivery at or after the displayed time. Up
-          to 10 messages per approval; attachments require individual review.
+          to 25 messages per approval; attachments require individual review.
         </p>
+        <div className="campaign-summary" role="status">
+          <strong>
+            Campaign approval: {items.length} initial emails +{" "}
+            {authorizeImportedFollowups
+              ? items.filter((m) => !!m.followup_proposal).length
+              : 0}{" "}
+            conditional follow-ups ={" "}
+            {items.length +
+              (authorizeImportedFollowups
+                ? items.filter((m) => !!m.followup_proposal).length
+                : 0)}{" "}
+            total authorized messages
+          </strong>
+          <p>
+            {authorizeImportedFollowups
+              ? "One approval authorizes both the initial emails and the exact automatic follow-ups below. No later preparation or approval is required."
+              : "Initial emails only. Automatic follow-ups will not be authorized."}
+          </p>
+        </div>
+        {items.some((m) => !m.followup_proposal) && (
+          <p role="alert" className="helper">
+            Missing follow-up content:{" "}
+            {items
+              .filter((m) => !m.followup_proposal)
+              .map((m) => m.professor_email)
+              .join(", ")}
+            . These rows can receive initial-only approval; complete the missing
+            subject, body and delay before campaign follow-up authorization.
+          </p>
+        )}
         {items.some((m) => m.followup_proposal) && (
           <label className="checkbox-label">
             <input
               type="checkbox"
+              disabled={items.some((m) => !m.followup_proposal)}
               checked={authorizeImportedFollowups}
               onChange={(e) => setAuthorizeImportedFollowups(e.target.checked)}
             />
-            I explicitly authorize each exact follow-up shown below, for its
-            displayed recipient and delay, only if no reply is detected.
+            Approve initial emails and automatic follow-ups. I explicitly
+            authorize every exact follow-up shown below for its recipient and
+            delay, only if no reply is detected.
           </label>
         )}
         {items.map((m) => (
@@ -677,6 +736,16 @@ export default function Home() {
             <p>
               {displayDate(m.scheduled_at, m.timezone)} ({m.timezone})
             </p>
+            {m.followup_issue && (
+              <div className="feedback error">
+                <strong>{m.followup_issue}</strong>
+                {m.followup_draft && (
+                  <pre className="email-preview">
+                    {JSON.stringify(JSON.parse(m.followup_draft), null, 2)}
+                  </pre>
+                )}
+              </div>
+            )}
             {m.followup_proposal &&
               (() => {
                 const f = JSON.parse(m.followup_proposal);
@@ -781,6 +850,48 @@ export default function Home() {
               </td>
               <td>
                 <div className="actions">
+                  <button className="secondary" onClick={() => setReview(m)}>
+                    View
+                  </button>
+                  <button
+                    className="secondary"
+                    disabled={busy}
+                    onClick={() =>
+                      act(async () => {
+                        await request(
+                          `/messages/${m.id}/${m.archived_at || m.hidden_at ? "restore" : "archive"}`,
+                          "POST",
+                          {},
+                        );
+                      }, "Record visibility updated; approved delivery status unchanged")
+                    }
+                  >
+                    {m.archived_at || m.hidden_at ? "Restore" : "Archive"}
+                  </button>
+                  {["sent", "replied", "failed", "cancelled"].includes(
+                    m.status,
+                  ) &&
+                    !m.hidden_at && (
+                      <button
+                        className="secondary"
+                        disabled={busy}
+                        onClick={() => {
+                          if (
+                            !window.confirm(
+                              "Remove this record from the dashboard and cancel any pending automatic follow-up? This does not recall delivered Gmail messages or erase delivery, authorization or opt-out history.",
+                            )
+                          )
+                            return;
+                          act(async () => {
+                            await request(`/messages/${m.id}/remove`, "POST", {
+                              confirmed: true,
+                            });
+                          }, "Removed from dashboard; Gmail delivery and audit history retained");
+                        }}
+                      >
+                        Remove from dashboard
+                      </button>
+                    )}
                   {(m.status === "draft" ||
                     (realWorkflow &&
                       m.status === "pending" &&
@@ -1300,6 +1411,21 @@ export default function Home() {
                     onChange={(e) => setQuery(e.target.value)}
                   />
                 </div>
+                <label>
+                  Show records
+                  <select
+                    aria-label="Professor record visibility"
+                    value={recordFilter}
+                    onChange={(e) => {
+                      setRecordFilter(e.target.value);
+                      setSelected([]);
+                    }}
+                  >
+                    <option value="active">Active</option>
+                    <option value="archived">Archived</option>
+                    <option value="all">All history</option>
+                  </select>
+                </label>
                 <label className="secondary upload-label">
                   <Upload size={16} /> Import CSV / Excel
                   <input
@@ -1364,6 +1490,49 @@ export default function Home() {
                       >
                         Edit details
                       </button>
+                      <div className="actions record-actions">
+                        <button
+                          className="secondary"
+                          disabled={busy}
+                          onClick={() =>
+                            act(
+                              async () => {
+                                await request(
+                                  `/professors/${p.id}/${p.archived_at ? "restore" : "archive"}`,
+                                  "POST",
+                                  {},
+                                );
+                              },
+                              p.archived_at
+                                ? "Professor restored"
+                                : "Professor archived; existing approved sending remains unchanged",
+                            )
+                          }
+                        >
+                          {p.archived_at ? "Restore" : "Archive"}
+                        </button>
+                        <button
+                          className="danger"
+                          disabled={busy}
+                          onClick={() => {
+                            if (
+                              !window.confirm(
+                                `Permanently delete ${p.name}? Profile details will be removed and queued emails/follow-ups cancelled. Minimal address, delivery and authorization audit records are retained to prevent further sending. Already accepted or in-flight Gmail messages cannot be recalled.`,
+                              )
+                            )
+                              return;
+                            act(async () => {
+                              await request(
+                                `/professors/${p.id}/delete`,
+                                "POST",
+                                { confirmed: true },
+                              );
+                            }, "Professor deleted; queued mail and automatic follow-ups cancelled");
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
                       <span className="professor-avatar">
                         {p.name
                           .split(" ")
@@ -1379,6 +1548,7 @@ export default function Home() {
                       <small>{p.email}</small>
                       <button
                         className="secondary"
+                        disabled={!!p.archived_at}
                         onClick={() => compose(p.id)}
                       >
                         Prepare outreach <ArrowUpRight size={16} />
@@ -1415,6 +1585,52 @@ export default function Home() {
           )}
           {view === "Outreach" && (
             <section className="panel">
+              <label>
+                Show records
+                <select
+                  aria-label="Outreach record visibility"
+                  value={recordFilter}
+                  onChange={(e) => {
+                    setRecordFilter(e.target.value);
+                    setSelected([]);
+                  }}
+                >
+                  <option value="active">Active</option>
+                  <option value="archived">Archived</option>
+                  <option value="all">All history (including removed)</option>
+                </select>
+              </label>
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  aria-label="Select all campaign drafts"
+                  checked={
+                    messages.some(
+                      (m) => m.mode === "manual" && m.status === "draft",
+                    ) &&
+                    messages
+                      .filter(
+                        (m) => m.mode === "manual" && m.status === "draft",
+                      )
+                      .every((m) => selected.includes(m.id))
+                  }
+                  onChange={(e) =>
+                    setSelected(
+                      e.target.checked
+                        ? messages
+                            .filter(
+                              (m) =>
+                                m.mode === "manual" &&
+                                m.status === "draft" &&
+                                !m.parent_id,
+                            )
+                            .map((m) => m.id)
+                        : [],
+                    )
+                  }
+                />
+                Select all campaign drafts for one review and approval
+              </label>
               <label className="status-filter">
                 Filter status
                 <select
@@ -1454,7 +1670,7 @@ export default function Home() {
                       !selected.length ||
                       (realWorkflow &&
                         (!gmailAccount ||
-                          selected.length > 10 ||
+                          selected.length > 25 ||
                           !state.capabilities.live_email))
                     }
                     onClick={() =>
@@ -1468,7 +1684,9 @@ export default function Home() {
                     }
                   >
                     {realWorkflow
-                      ? "Approve & schedule selected"
+                      ? authorizeImportedFollowups
+                        ? "Approve initial emails and automatic follow-ups"
+                        : "Approve initial emails only"
                       : "Approve selected"}{" "}
                     ({selected.length})
                   </button>
@@ -1495,7 +1713,8 @@ export default function Home() {
               <div className="panel-footer">
                 <ShieldCheck size={16} /> AI review drafts require individual
                 approval. Gmail delivery requires your exact message approval;
-                follow-ups need separate explicit authorization.
+                you can authorize its exact conditional follow-ups in this same
+                one-time campaign approval.
               </div>
             </section>
           )}
@@ -1728,31 +1947,93 @@ export default function Home() {
                 </span>
               </div>
               {state.automation.map((a) => {
-                const parent = messages.find((m) => m.id === a.message_id);
-                if (!parent) return null;
-                const child = messages.find((m) => m.parent_id === parent.id);
-                const label = child
-                  ? "Follow-up: " + deliveryLabel(child)
-                  : a.generated
-                    ? "Follow-up cancelled"
-                    : parent.status === "sent"
-                      ? "Follow-up scheduled"
-                      : "Follow-up authorized - waiting for initial delivery";
+                const parent = state.messages.find(
+                  (m) => m.id === a.message_id,
+                );
+                if (!parent || !visibleRecord(parent)) return null;
+                const child = state.messages.find(
+                  (m) => m.id === a.followup_id || m.parent_id === parent.id,
+                );
+                const due =
+                  a.due_at ??
+                  (a.sent_at || parent.sent_at
+                    ? Date.parse(a.sent_at || parent.sent_at!) +
+                      a.days * 86400000
+                    : null);
+                const reason = a.cancel_reason;
+                const label = a.followup_provider_id
+                  ? "Follow-up sent"
+                  : reason === "reply" ||
+                      (parent.status === "replied" && reason !== "opt_out")
+                    ? "Cancelled because of reply"
+                    : reason === "opt_out"
+                      ? "Cancelled because of opt-out"
+                      : reason === "professor_deleted"
+                        ? "Cancelled because professor was deleted"
+                        : child?.status === "failed" ||
+                            a.initial_status === "failed"
+                          ? "Failed"
+                          : a.generated &&
+                              (!child || child.status === "cancelled")
+                            ? "Follow-up cancelled"
+                            : a.initial_provider_id
+                              ? "Follow-up scheduled"
+                              : "Automatic follow-up approved";
                 return (
                   <div className="document-row" key={a.message_id}>
                     <div>
                       <strong>{label}</strong>
                       <p>
-                        {parent.professor_email} - {a.days} days after confirmed
-                        sending
+                        {parent.professor_email} - {a.days} day conditional
+                        delay
                       </p>
-                      <p>{a.subject}</p>
+                      {a.initial_provider_id && (
+                        <p>
+                          Initial email sent
+                          {!a.generated && !a.followup_provider_id
+                            ? " - Waiting for reply"
+                            : ""}
+                        </p>
+                      )}
+                      <p>Automatic follow-up approved: {a.subject}</p>
+                      <pre className="email-preview">{a.body}</pre>
+                      <p>
+                        {due
+                          ? `Scheduled follow-up: ${displayDate(new Date(due).toISOString(), parent.timezone)} (${parent.timezone}) - UTC ${new Date(due).toISOString()}`
+                          : "Exact due time will be calculated after Gmail accepts the initial email."}
+                      </p>
+                      {a.followup_provider_id && (
+                        <small>
+                          Gmail message ID: {a.followup_provider_id}
+                        </small>
+                      )}
+                      <p className="helper">
+                        Already authorized with its initial email. No
+                        preparation or further approval is required.
+                      </p>
                       <button
                         className="secondary"
                         onClick={() => setReview(parent)}
                       >
-                        Review follow-up
+                        View campaign
                       </button>
+                      {!a.generated && (
+                        <button
+                          className="secondary"
+                          disabled={busy}
+                          onClick={() =>
+                            act(async () => {
+                              await request(
+                                `/messages/${parent.id}/automation/cancel`,
+                                "POST",
+                                {},
+                              );
+                            }, "Preapproved follow-up cancelled")
+                          }
+                        >
+                          Cancel automatic follow-up
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -1788,7 +2069,7 @@ export default function Home() {
                   </button>
                 </div>
               ))}
-              {!followups.length && (
+              {!followups.length && !state.automation.length && (
                 <div className="empty">
                   <CalendarClock size={30} />
                   <h3>A little space for the next conversation</h3>
@@ -2726,6 +3007,7 @@ export default function Home() {
                     </p>
                   ))}
                 {review.followup_proposal &&
+                  !state.automation.some((a) => a.message_id === review.id) &&
                   (() => {
                     const proposal = JSON.parse(review.followup_proposal);
                     return (
@@ -2737,10 +3019,9 @@ export default function Home() {
                         <strong>{proposal.subject}</strong>
                         <pre className="email-preview">{proposal.body}</pre>
                         <p className="helper">
-                          Import and batch approval do not authorize this
-                          follow-up. Open the composer, select a mailbox, and
-                          explicitly authorize the exact follow-up before
-                          scheduling a live test.
+                          {review.status === "draft"
+                            ? "Select the combined initial-email and automatic-follow-up option in this campaign review to authorize it once. Initial-only approval leaves it inactive."
+                            : "This follow-up was not authorized with the initial campaign. The original approval cannot be expanded; a manual follow-up requires a new explicitly reviewed message."}
                         </p>
                         {review.status === "draft" && (
                           <button
@@ -2861,7 +3142,9 @@ export default function Home() {
                   >
                     <Check size={16} />{" "}
                     {realWorkflow
-                      ? "Approve & schedule through Gmail"
+                      ? authorizeImportedFollowups
+                        ? "Approve initial emails and automatic follow-ups"
+                        : "Approve initial email only"
                       : "Approve this exact email"}
                   </button>
                 )}
