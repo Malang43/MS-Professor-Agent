@@ -33,3 +33,21 @@ A managed Cloudflare widget was created for `ms-professor-agent-malang43.vercel.
 Automatic approval review rejected changing the existing workspace verification gate, including an explicit dashboard/profile/professor/private-document route allowlist. The user was asked for explicit approval of that scope. Until approved, new accounts can register and sign in but remain workspace-gated; pending accounts are preserved. This requested registration-access change is not represented as completed.
 
 Deployment identifiers and final check counts are recorded after release.
+
+## Verified release results
+
+Application source commit: `404cd55bed42a4b99c77b693dbb0967aec3b04bc`, pushed to the existing private main branch. GitHub CI succeeded: https://github.com/Malang43/MS-Professor-Agent/actions/runs/40369608865 .
+
+244 automated tests passed in 14 files. Both workspace TypeScript checks, the optimized frontend build and full npm audit passed; audit reported zero vulnerabilities. Both native Workers checks passed. Local browser authentication/recovery and original Excel/campaign workflow checks passed with zero deliveries.
+
+Migration `0007_auth_options.sql` applied successfully to production. Worker version `e70b7eb6-7ac5-4718-ae68-26066e05fb32` is deployed on the unchanged service and minute cron. The retrieved deployed module exactly matches the reviewed bundle, SHA-256 `434f48d19ac6fdfee1f7b7de95dc7cb963a0b0ec03205183e0a16e11f0e9cb2a`.
+
+Vercel automatically deployed application commit 404cd55 and reported READY as deployment `dpl_3ZDnRRCP5QoNCNsqnWJa636oA9Zw`, retaining the canonical URL. Canonical production assets include the recovery/passkey and separate-follow-up approval UI and the Turnstile CSP entries. Direct Worker and Vercel proxy checks both passed: Gmail provider/live status and mailbox readiness, KV storage, required passkey user verification and canonical RP ID, no-store caching, authentication denial and foreign-origin denial.
+
+Post-deploy stable fingerprints match for existing account/password records, documents, Gmail connection identities/status/scopes, deliveries, original authorizations and campaign selections. Existing provider token material was not rewritten; normal provider-managed refreshes are excluded from stable identity fingerprints. Original send timestamps/provider/thread IDs and reply status are unchanged. No new delivery was introduced by testing or deployment. Existing credentials/Groq settings and outreach activation are preserved. Mailjet delivery remains disabled.
+
+### Remaining owner actions
+
+1. Irshad: review the exact proposal in the existing email details and click **Approve this exact automatic follow-up once** only if desired. This is separate explicit consent; the original initial-only campaign stays unchanged. No approval has been applied by this release.
+2. Workspace access: approve the pending question for signed-in unverified users to view their own dashboard, edit their academic profile, manage professors, and upload/read/delete private documents while mailbox connections and email sending remain verification-gated. Automatic approval review rejected that gate change; it has not been applied.
+3. Turnstile: production keys and a Managed widget already exist for the exact hostname, but enforcement is off. The locally prepared, ignored owner helper can open a visible verification browser when the owner explicitly invokes `node apps/api/.wrangler/verify-turnstile-browser.cjs --headed` from the project root. Complete the challenge. Only after its PASS confirms genuine hostname/action-matched Siteverify should the owner set **Workers & Pages → ms-professor-outreach-api → Settings → Variables and Secrets → TURNSTILE_ENABLED = true** and deploy the settings change. Do not paste the secret into chat, Git or frontend environment variables. No widget creation or key purchase is needed.
