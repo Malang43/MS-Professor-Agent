@@ -5,53 +5,154 @@ import {
   startRegistration,
 } from "@simplewebauthn/browser";
 import type { Api } from "./account-ui";
-export function Turnstile() {
+type TurnstileApi = {
+  render: (element: HTMLElement, options: Record<string, unknown>) => string;
+  remove: (id: string) => void;
+};
+let turnstileScript: Promise<TurnstileApi> | null = null;
+function loadTurnstile(): Promise<TurnstileApi> {
+  const current = () =>
+    (window as Window & { turnstile?: TurnstileApi }).turnstile;
+  if (current()) return Promise.resolve(current()!);
+  if (!turnstileScript) {
+    turnstileScript = new Promise<TurnstileApi>((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src =
+        "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+      script.async = true;
+      const fail = () => {
+        clearTimeout(timer);
+        script.remove();
+        reject(new Error("Unable to load the security check. Please retry."));
+      };
+      const timer = setTimeout(fail, 15000);
+      script.onload = () => {
+        clearTimeout(timer);
+        if (current()) resolve(current()!);
+        else fail();
+      };
+      script.onerror = fail;
+      document.head.appendChild(script);
+    }).catch((error) => {
+      turnstileScript = null;
+      throw error;
+    });
+  }
+  return turnstileScript;
+}
+export function Turnstile({
+  onReady,
+  reset,
+}: {
+  onReady: (ready: boolean) => void;
+  reset: number;
+}) {
   const host = useRef<HTMLDivElement>(null);
-  const [key, setKey] = useState<string | null>(null);
+  const ready = useRef(onReady);
+  ready.current = onReady;
+  const [config, setConfig] = useState<{
+    turnstile_site_key: string | null;
+    turnstile_required: boolean;
+  } | null>(null);
   const [error, setError] = useState("");
+  const [status, setStatus] = useState("Loading security check...");
+  const [retry, setRetry] = useState(0);
   useEffect(() => {
-    fetch("/api/auth/config")
-      .then((r) => r.json())
-      .then((v) => setKey(v.turnstile_site_key))
-      .catch(() =>
-        setError("Unable to load signup protection. Reload to try again."),
-      );
-  }, []);
-  useEffect(() => {
-    if (!key || !host.current) return;
-    let widget: string | undefined,
-      disposed = false;
-    const render = () => {
-      const t = (window as any).turnstile;
-      if (disposed || !t || !host.current) return;
-      widget = t.render(host.current, {
-        sitekey: key,
-        action: "signup",
-        size: "flexible",
-        "error-callback": () =>
-          setError("Bot protection failed. Please reload and try again."),
+    const controller = new AbortController();
+    setError("");
+    setConfig(null);
+    setStatus("Loading security check...");
+    ready.current(false);
+    fetch("/api/auth/config", { signal: controller.signal, cache: "no-store" })
+      .then(async (r) => {
+        if (!r.ok)
+          throw new Error("Unable to load signup protection. Please retry.");
+        return r.json();
+      })
+      .then((v) => {
+        setConfig(v);
+        if (!v.turnstile_site_key) {
+          setStatus("");
+          if (v.turnstile_required)
+            setError(
+              "The security check is temporarily unavailable. Please retry later.",
+            );
+          else ready.current(true);
+        }
+      })
+      .catch((e) => {
+        if (!controller.signal.aborted) setError(e.message);
       });
-    };
-    const script = document.createElement("script");
-    script.src =
-      "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
-    script.async = true;
-    script.onload = render;
-    script.onerror = () =>
-      setError("Unable to load bot protection. Check your connection.");
-    if ((window as any).turnstile) render();
-    else document.head.appendChild(script);
+    return () => controller.abort();
+  }, [retry]);
+  useEffect(() => {
+    if (!config?.turnstile_site_key || !host.current) return;
+    let disposed = false,
+      widget: string | undefined,
+      api: TurnstileApi | undefined;
+    setError("");
+    setStatus("Complete the security check.");
+    ready.current(!config.turnstile_required);
+    loadTurnstile()
+      .then((t) => {
+        if (disposed || !host.current) return;
+        api = t;
+        widget = t.render(host.current, {
+          sitekey: config.turnstile_site_key,
+          action: "signup",
+          size: host.current.clientWidth < 300 ? "compact" : "flexible",
+          appearance: "always",
+          callback: () => {
+            setStatus("Security check complete.");
+            setError("");
+            ready.current(true);
+          },
+          "expired-callback": () => {
+            setStatus("Security check expired. Please complete it again.");
+            ready.current(!config.turnstile_required);
+          },
+          "timeout-callback": () => {
+            setStatus("Security check timed out. Please try again.");
+            ready.current(!config.turnstile_required);
+          },
+          "error-callback": () => {
+            setError("The security check failed. Please retry.");
+            ready.current(!config.turnstile_required);
+          },
+        });
+      })
+      .catch((e) => {
+        if (!disposed) {
+          setError(e.message);
+          ready.current(!config.turnstile_required);
+        }
+      });
     return () => {
       disposed = true;
-      if (widget) (window as any).turnstile?.remove(widget);
-      script.remove();
+      if (widget !== undefined) api?.remove(widget);
     };
-  }, [key]);
+  }, [config, reset]);
   return (
-    <>
+    <div className="signup-protection">
       <div ref={host} aria-label="Signup bot protection" />
-      {error && <p role="alert">{error}</p>}
-    </>
+      {status && (
+        <p className="helper" role="status">
+          {status}
+        </p>
+      )}
+      {error && (
+        <>
+          <p role="alert">{error}</p>
+          <button
+            className="secondary"
+            type="button"
+            onClick={() => setRetry((v) => v + 1)}
+          >
+            Retry security check
+          </button>
+        </>
+      )}
+    </div>
   );
 }
 export function PasskeyLogin({

@@ -1,10 +1,9 @@
 import { type Env, HttpError, consume, hash } from "./runtime";
+export function turnstileConfigured(env: Env) {
+  return !!env.TURNSTILE_SITE_KEY && !!env.TURNSTILE_SECRET_KEY;
+}
 export function turnstileReady(env: Env) {
-  return (
-    env.TURNSTILE_ENABLED === "true" &&
-    !!env.TURNSTILE_SITE_KEY &&
-    !!env.TURNSTILE_SECRET_KEY
-  );
+  return env.TURNSTILE_ENABLED === "true" && turnstileConfigured(env);
 }
 export async function verifyTurnstile(
   req: Request,
@@ -12,7 +11,13 @@ export async function verifyTurnstile(
   token: unknown,
   network: typeof fetch = fetch,
 ) {
-  if (!turnstileReady(env)) return;
+  // During rollout, verify genuine widget responses without requiring a token yet.
+  if (env.TURNSTILE_ENABLED !== "true" && !token) return;
+  if (!turnstileConfigured(env))
+    throw new HttpError(
+      503,
+      "Signup protection is temporarily unavailable. Try again later.",
+    );
   if (typeof token !== "string" || !token || token.length > 2048)
     throw new HttpError(400, "Complete the bot protection check.");
   let result: any;

@@ -1,4 +1,4 @@
-import { turnstileReady, verifyTurnstile } from "./turnstile";
+import { turnstileConfigured, verifyTurnstile } from "./turnstile";
 import {
   mailReady,
   sendAccountLink,
@@ -45,7 +45,10 @@ export async function accountPublic(
   const path = new URL(req.url).pathname;
   if (path === "/api/auth/config" && req.method === "GET")
     return Response.json({
-      turnstile_site_key: turnstileReady(env) ? env.TURNSTILE_SITE_KEY : null,
+      turnstile_site_key: turnstileConfigured(env)
+        ? env.TURNSTILE_SITE_KEY
+        : null,
+      turnstile_required: env.TURNSTILE_ENABLED === "true",
     });
   if (
     ![

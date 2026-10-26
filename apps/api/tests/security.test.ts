@@ -510,3 +510,132 @@ describe("security isolation and lifecycle", () => {
     ).not.toContain("never-public");
   });
 });
+
+describe("Turnstile configuration and signup enforcement", () => {
+  it("publishes the configured public site key before enforcement without exposing the secret", async () => {
+    Object.assign(h.env, {
+      TURNSTILE_SITE_KEY: "configured-site-key",
+      TURNSTILE_SECRET_KEY: "never-public",
+      TURNSTILE_ENABLED: "false",
+    });
+    const r = await h.request("/auth/config");
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({
+      turnstile_site_key: "configured-site-key",
+      turnstile_required: false,
+    });
+    expect(r.headers.get("Cache-Control")).toContain("no-store");
+    h.env.TURNSTILE_ENABLED = "true";
+    expect(await (await h.request("/auth/config")).json()).toEqual({
+      turnstile_site_key: "configured-site-key",
+      turnstile_required: true,
+    });
+  });
+  it("fails closed when enforcement is enabled but a key is missing", async () => {
+    h.env.TURNSTILE_ENABLED = "true";
+    const network = vi.fn();
+    await expect(
+      verifyTurnstile(new Request("https://api.test"), h.env, "token", network),
+    ).rejects.toThrow("temporarily unavailable");
+    expect(network).not.toHaveBeenCalled();
+    expect(await (await h.request("/auth/config")).json()).toEqual({
+      turnstile_site_key: null,
+      turnstile_required: true,
+    });
+  });
+  it("rejects missing, invalid and replayed tokens at the actual signup route", async () => {
+    Object.assign(h.env, {
+      TURNSTILE_ENABLED: "true",
+      TURNSTILE_SITE_KEY: "production-key",
+      TURNSTILE_SECRET_KEY: "server-only",
+    });
+    const input = {
+      email: "protected@example.invalid",
+      password,
+      confirm_password: password,
+      first_name: "Amira",
+      last_name: "Research",
+      accept_terms: true,
+    };
+    const network = vi.fn(async (_url: any, init: any) => {
+      expect(_url).toBe(
+        "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+      );
+      expect(init.body.get("secret")).toBe("server-only");
+      return Response.json({
+        success: init.body.get("response") === "valid-synthetic-token",
+        hostname: new URL(h.env.APP_ORIGIN).hostname,
+        action: "signup",
+        challenge_ts: new Date().toISOString(),
+      });
+    });
+    vi.stubGlobal("fetch", network);
+    expect((await h.request("/auth/signup", "POST", input)).status).toBe(400);
+    expect(network).not.toHaveBeenCalled();
+    expect(
+      (
+        await h.request("/auth/signup", "POST", {
+          ...input,
+          turnstile_token: "invalid",
+        })
+      ).status,
+    ).toBe(400);
+    expect(h.db.prepare("SELECT count(*) n FROM users").get()!.n).toBe(0);
+    expect(
+      (
+        await h.request("/auth/signup", "POST", {
+          ...input,
+          turnstile_token: "valid-synthetic-token",
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await h.request("/auth/signup", "POST", {
+          ...input,
+          turnstile_token: "valid-synthetic-token",
+        })
+      ).status,
+    ).toBe(429);
+    expect(h.db.prepare("SELECT count(*) n FROM users").get()!.n).toBe(1);
+  });
+  it("renders nothing only when keys have not been installed", async () => {
+    expect(await (await h.request("/auth/config")).json()).toEqual({
+      turnstile_site_key: null,
+      turnstile_required: false,
+    });
+  });
+});
+
+it("validates supplied preview tokens before enforcement, without requiring absent tokens", async () => {
+  const h = harness();
+  Object.assign(h.env, {
+    TURNSTILE_SITE_KEY: "production-key",
+    TURNSTILE_SECRET_KEY: "server-only",
+    TURNSTILE_ENABLED: "false",
+  });
+  const req = new Request("https://api.test"),
+    network = vi.fn(async () =>
+      Response.json({
+        success: true,
+        hostname: new URL(h.env.APP_ORIGIN).hostname,
+        action: "signup",
+        challenge_ts: new Date().toISOString(),
+      }),
+    );
+  try {
+    await verifyTurnstile(req, h.env, undefined, network);
+    expect(network).not.toHaveBeenCalled();
+    await verifyTurnstile(req, h.env, "genuine-preview-fixture", network);
+    expect(network).toHaveBeenCalledOnce();
+    expect(
+      h.db
+        .prepare(
+          "SELECT count(*) n FROM usage_counters WHERE scope LIKE 'turnstile:%'",
+        )
+        .get()!.n,
+    ).toBe(1);
+  } finally {
+    h.db.close();
+  }
+});

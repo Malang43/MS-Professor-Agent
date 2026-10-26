@@ -89,6 +89,8 @@ export function AuthPanel({
   onCancel?: () => void;
 }) {
   const [completed, setCompleted] = useState(false);
+  const [securityReady, setSecurityReady] = useState(false);
+  const [securityReset, setSecurityReset] = useState(0);
   const [mode, setMode] = useState<"login" | "signup" | "forgot">("login"),
     [password, setPassword] = useState(""),
     [email, setEmail] = useState(""),
@@ -133,6 +135,7 @@ export function AuthPanel({
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to complete request.");
+      if (!intent && mode === "signup") setSecurityReset((v) => v + 1);
     } finally {
       setBusy(false);
     }
@@ -323,9 +326,14 @@ export function AuthPanel({
                 </p>
               )}
               {!intent && mode === "signup" && (
-                <Turnstile key={busy ? "submitting" : "ready"} />
+                <Turnstile onReady={setSecurityReady} reset={securityReset} />
               )}
-              <button className="primary full" disabled={busy}>
+              <button
+                className="primary full"
+                disabled={
+                  busy || (!intent && mode === "signup" && !securityReady)
+                }
+              >
                 {busy
                   ? "Please wait…"
                   : intent
