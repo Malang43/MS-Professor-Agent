@@ -1,3 +1,4 @@
+import { workspaceAccess, limitedWorkspaceState } from "./workspace-access";
 import { approveFollowup } from "./followup-approval";
 import { securityPublic, securityPrivate } from "./security";
 import { z } from "zod";
@@ -15,7 +16,6 @@ import { spreadsheetDraft } from "../../../shared/spreadsheet";
 import {
   accountPublic,
   accountPrivate,
-  requireVerified,
   cleanDeletedAccounts,
 } from "./accounts";
 import { type Env, HttpError, consume } from "./runtime";
@@ -202,7 +202,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (privateSecurity) return privateSecurity;
   const privateAccount = await accountPrivate(req, env, user);
   if (privateAccount) return privateAccount;
-  await requireVerified(env, user);
+  const limitedWorkspace = await workspaceAccess(req, env, user);
   const followupApproval = path.match(
     /^\/api\/messages\/([^/]+)\/approve-followup$/,
   );
@@ -314,6 +314,7 @@ async function route(req: Request, env: Env): Promise<Response> {
     return json({ ok: true });
   }
   if (path === "/api/state" && method === "GET") {
+    if (limitedWorkspace) return limitedWorkspaceState(env, user);
     const [profile, professors, documents, messages, history, account] =
       await Promise.all([
         env.DB.prepare("SELECT * FROM profiles WHERE user_id=?")
@@ -371,6 +372,7 @@ async function route(req: Request, env: Env): Promise<Response> {
           .all()
       ).results,
       capabilities: {
+        workspace_limited: false,
         gmail: oauthAvailable(env, "gmail"),
         outlook: oauthAvailable(env, "outlook"),
         live_email: liveEnabled(env) && isLiveOwner(env, user),

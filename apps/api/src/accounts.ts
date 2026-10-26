@@ -116,7 +116,11 @@ export async function accountPublic(
         .first<{ id: string; email: string }>();
       if (created) await sendAccountLink(env, created, "verify");
     }
-    return ok();
+    return Response.json({
+      ok: true,
+      message:
+        "Account request complete. Sign in with your password to access your private workspace. Email Not Verified until ownership is confirmed.",
+    });
   }
   if (path.endsWith("login")) {
     const input = z
@@ -422,7 +426,7 @@ export async function requireVerified(env: Env, user: string) {
   if (!account.email_verified_at && !account.legacy_access)
     throw new HttpError(
       403,
-      "Verify your email before opening your workspace.",
+      "Verify your email before using mailbox, outreach or other restricted features.",
     );
 }
 export async function cleanDeletedAccounts(env: Env) {

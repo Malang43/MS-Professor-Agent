@@ -2,7 +2,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
   AuthPanel,
-  VerificationGate,
   AccountSettings,
   PolicyNotice,
   type Identity,
@@ -107,6 +106,7 @@ type State = {
     scopes: string;
   }[];
   capabilities: {
+    workspace_limited: boolean;
     gmail: boolean;
     outlook: boolean;
     live_email: boolean;
@@ -388,10 +388,6 @@ export default function Home() {
       const me = await request("/auth/me");
       setIdentity(me.account);
       setMailReady(me.mail_delivery_ready);
-      if (!me.account.email_verified_at && !me.account.legacy_access) {
-        setState(null);
-        return;
-      }
       const data = await request("/state");
       setState(data);
       setProfile(data.profile);
@@ -449,6 +445,10 @@ export default function Home() {
     }
   }
   function compose(professorId = "") {
+    if (state?.capabilities.workspace_limited) {
+      setError("Verify your email before preparing outreach.");
+      return;
+    }
     setDraft({
       sending_account_id: "",
       followup_enabled: false,
@@ -494,8 +494,9 @@ export default function Home() {
     if (!rows.length || rows.length > 500)
       throw new Error("Import between 1 and 500 professors");
     if (
-      includeImportDrafts ||
-      rows.some((r) => r.subject || r.body || r.scheduled_at)
+      !state?.capabilities.workspace_limited &&
+      (includeImportDrafts ||
+        rows.some((r) => r.subject || r.body || r.scheduled_at))
     ) {
       if (rows.length > 25)
         throw new Error(
@@ -623,16 +624,8 @@ export default function Home() {
         onComplete={refresh}
       />
     );
-  if (identity && !identity.email_verified_at && !identity.legacy_access)
-    return (
-      <VerificationGate
-        account={identity}
-        ready={mailReady}
-        api={request}
-        refresh={refresh}
-      />
-    );
   if (!state) return <AuthPanel api={request} onComplete={refresh} />;
+  const limitedWorkspace = state.capabilities.workspace_limited;
   const realWorkflow = !state.capabilities.mock_delivery;
   const gmailAccount =
     approvalAccount ||
@@ -999,23 +992,35 @@ export default function Home() {
           RESEARCH WORKSPACE <span>MS</span>
         </div>
         <nav>
-          {nav.map(([name, Icon]) => (
-            <button
-              key={name}
-              className={view === name ? "active" : ""}
-              onClick={() => {
-                setView(name);
-                setQuery("");
-                setMobile(false);
-              }}
-            >
-              <Icon size={19} />
-              {name}
-              {name === "Outreach" && counts.pending > 0 && (
-                <span className="nav-count">{counts.pending}</span>
-              )}
-            </button>
-          ))}
+          {nav
+            .filter(
+              ([name]) =>
+                !limitedWorkspace ||
+                [
+                  "Overview",
+                  "Professors",
+                  "Documents",
+                  "Academic profile",
+                  "Settings",
+                ].includes(name),
+            )
+            .map(([name, Icon]) => (
+              <button
+                key={name}
+                className={view === name ? "active" : ""}
+                onClick={() => {
+                  setView(name);
+                  setQuery("");
+                  setMobile(false);
+                }}
+              >
+                <Icon size={19} />
+                {name}
+                {name === "Outreach" && counts.pending > 0 && (
+                  <span className="nav-count">{counts.pending}</span>
+                )}
+              </button>
+            ))}
         </nav>
         <div className="sidebar-bottom">
           <div className="mock-card">
@@ -1030,9 +1035,11 @@ export default function Home() {
                 ? state.capabilities.production_outreach
                   ? "Real Gmail outreach enabled."
                   : "Real Gmail enabled - controlled testing."
-                : state.capabilities.mock_delivery
-                  ? "Email sending is simulated."
-                  : "Real sending disabled. Drafts cannot send."}{" "}
+                : limitedWorkspace
+                  ? "Email Not Verified. Private workspace access only."
+                  : state.capabilities.mock_delivery
+                    ? "Email sending is simulated."
+                    : "Real sending disabled. Drafts cannot send."}{" "}
               {state.capabilities.ai === "groq"
                 ? "Groq template selection active."
                 : "Editable factual templates active."}
@@ -1097,6 +1104,7 @@ export default function Home() {
                   : "Real sending disabled"}
             </span>
             <button
+              disabled={limitedWorkspace}
               aria-label="Follow-up notifications"
               className="notification"
               onClick={() => setView("Follow-ups")}
@@ -1137,7 +1145,7 @@ export default function Home() {
                               : "Help professors understand the researcher behind the email."}
               </p>
             </div>
-            {["Overview", "Outreach"].includes(view) && (
+            {!limitedWorkspace && ["Overview", "Outreach"].includes(view) && (
               <button className="primary" onClick={() => compose()}>
                 <Plus size={17} /> Compose outreach
               </button>
@@ -1148,7 +1156,7 @@ export default function Home() {
               </button>
             )}
           </div>
-          {profile.paused || profile.stopped ? (
+          {!limitedWorkspace && (profile.paused || profile.stopped) ? (
             <div className="control-banner">
               <Pause size={18} />
               {profile.stopped
@@ -1165,7 +1173,36 @@ export default function Home() {
               </button>
             </div>
           ) : null}
-          {view === "Overview" && (
+          {limitedWorkspace && view === "Overview" && (
+            <section className="panel">
+              <h2>Your private research workspace</h2>
+              <p>
+                Manage your academic profile, research shortlist and private
+                documents.
+              </p>
+              <div className="actions">
+                <button
+                  className="primary"
+                  onClick={() => setView("Academic profile")}
+                >
+                  Edit academic profile
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => setView("Professors")}
+                >
+                  Manage professors ({professors.length})
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => setView("Documents")}
+                >
+                  Manage documents ({state.documents.length})
+                </button>
+              </div>
+            </section>
+          )}
+          {!limitedWorkspace && view === "Overview" && (
             <>
               <section className="hero">
                 <div>
@@ -1444,6 +1481,7 @@ export default function Home() {
               <label className="checkbox-label import-option">
                 <input
                   type="checkbox"
+                  disabled={limitedWorkspace}
                   checked={includeImportDrafts}
                   onChange={(e) => setIncludeImportDrafts(e.target.checked)}
                 />
@@ -1550,7 +1588,7 @@ export default function Home() {
                       <small>{p.email}</small>
                       <button
                         className="secondary"
-                        disabled={!!p.archived_at}
+                        disabled={limitedWorkspace || !!p.archived_at}
                         onClick={() => compose(p.id)}
                       >
                         Prepare outreach <ArrowUpRight size={16} />
@@ -2089,279 +2127,296 @@ export default function Home() {
                   refresh={refresh}
                 />
               )}
-              <section className="panel settings-card">
-                <h2>Email connections</h2>
-                <p>
-                  Gmail delivers only approved messages. Reply access lets the
-                  scheduler cancel follow-ups. Controlled testing remains
-                  restricted until the owner activates professor outreach.
-                </p>
-                {(["gmail", "outlook"] as const).map((provider) => (
-                  <div className="provider" key={provider}>
-                    <Mail size={21} />
-                    <strong>
-                      {provider === "gmail" ? "Gmail" : "Microsoft Outlook"}
-                    </strong>
+              {!limitedWorkspace && (
+                <>
+                  <section className="panel settings-card">
+                    <h2>Email connections</h2>
+                    <p>
+                      Gmail delivers only approved messages. Reply access lets
+                      the scheduler cancel follow-ups. Controlled testing
+                      remains restricted until the owner activates professor
+                      outreach.
+                    </p>
+                    {(["gmail", "outlook"] as const).map((provider) => (
+                      <div className="provider" key={provider}>
+                        <Mail size={21} />
+                        <strong>
+                          {provider === "gmail" ? "Gmail" : "Microsoft Outlook"}
+                        </strong>
+                        <button
+                          className="secondary"
+                          disabled={busy || !state.capabilities[provider]}
+                          onClick={() =>
+                            act(async () => {
+                              const result = await request(
+                                `/connections/${provider}/start`,
+                                "POST",
+                                { read_replies: true },
+                              );
+                              window.location.assign(result.url);
+                            }, "Opening provider consent")
+                          }
+                        >
+                          Connect with reply access
+                        </button>
+                        {!state.capabilities[provider] && (
+                          <small>Administrator setup required</small>
+                        )}
+                      </div>
+                    ))}
+                    <p className="helper">
+                      Reply access permits reading mailbox threads to stop
+                      follow-ups. You review the provider consent screen.
+                      Microsoft users can also remove this app's consent in
+                      their Microsoft account.
+                    </p>
+                    {state.connections.map((account) => (
+                      <div className="provider" key={account.id}>
+                        <strong>{account.address}</strong>
+                        <span>
+                          {account.provider === "gmail" ? "Gmail " : "Outlook "}
+                          {account.status}
+                        </span>
+                        {state.mailbox_checks
+                          ?.filter((k) => k.connection_id === account.id)
+                          .map((k) => (
+                            <small key={k.connection_id}>
+                              {k.status}: {k.detail}
+                            </small>
+                          ))}
+                        <button
+                          className="secondary"
+                          disabled={busy}
+                          onClick={() =>
+                            act(async () => {
+                              await request(
+                                `/connections/${account.id}/disconnect`,
+                                "POST",
+                              );
+                            }, "Account disconnected; outstanding messages cancelled")
+                          }
+                        >
+                          Disconnect
+                        </button>
+                      </div>
+                    ))}
+                    {realWorkflow && (
+                      <div>
+                        <h3>
+                          Real sending{" "}
+                          {state.capabilities.live_email
+                            ? "enabled"
+                            : "disabled"}
+                        </h3>
+                        <p>
+                          {state.capabilities.production_outreach
+                            ? "Professor outreach activated by owner"
+                            : "Controlled testing: " +
+                              state.capabilities.test_recipients.join(", ")}
+                        </p>
+                        {state.capabilities.live_owner && (
+                          <>
+                            <p>
+                              Production activation requires a confirmed Gmail
+                              delivery to both test addresses and a detected
+                              reply to a test. Test delivery:{" "}
+                              {state.capabilities.activation.delivered
+                                ? "passed"
+                                : "pending"}
+                              . Reply detection:{" "}
+                              {state.capabilities.activation.reply_detected
+                                ? "passed"
+                                : "pending"}
+                              .
+                            </p>
+                            <button
+                              className="secondary"
+                              disabled={
+                                busy ||
+                                !state.capabilities.live_email ||
+                                (!state.capabilities.production_outreach &&
+                                  !state.capabilities.activation.can_activate)
+                              }
+                              onClick={() => {
+                                if (
+                                  !window.confirm(
+                                    state.capabilities.production_outreach
+                                      ? "Restrict future sends to controlled test recipients?"
+                                      : "Enable real outreach to professor addresses you explicitly enter/import and approve? This does not approve any messages.",
+                                  )
+                                )
+                                  return;
+                                act(async () => {
+                                  await request("/outreach/mode", "POST", {
+                                    production_enabled:
+                                      !state.capabilities.production_outreach,
+                                    confirmed: true,
+                                  });
+                                }, "Sending mode updated; message approval is still required");
+                              }}
+                            >
+                              {state.capabilities.production_outreach
+                                ? "Return to controlled testing"
+                                : "Activate professor outreach"}
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
+                    <h3>AI provider</h3>
+                    <p>
+                      {state.capabilities.ai === "groq"
+                        ? "Groq configured with safe template fallback"
+                        : "Editable factual templates"}{" "}
+                      ? {state.ai_usage.requests} AI requests /{" "}
+                      {state.ai_usage.tokens} tokens used
+                    </p>
+                    <p className="helper">
+                      AI selects from factual templates; it does not invent
+                      research, publications, affiliations or funding. Only
+                      student-entered profile and professor fields are used.
+                      Always preview and edit before approval.
+                    </p>
                     <button
                       className="secondary"
-                      disabled={busy || !state.capabilities[provider]}
+                      disabled={
+                        busy ||
+                        !state.connections.some(
+                          (account) =>
+                            account.status === "connected" &&
+                            state.capabilities[account.provider] &&
+                            /gmail.readonly|Mail.Read/.test(account.scopes),
+                        )
+                      }
                       onClick={() =>
                         act(async () => {
-                          const result = await request(
-                            `/connections/${provider}/start`,
-                            "POST",
-                            { read_replies: true },
-                          );
-                          window.location.assign(result.url);
-                        }, "Opening provider consent")
+                          await request("/connections/sync", "POST");
+                        }, "Bounded reply check completed")
                       }
                     >
-                      Connect with reply access
+                      Check replies now
                     </button>
-                    {!state.capabilities[provider] && (
-                      <small>Administrator setup required</small>
+                    {realWorkflow && (
+                      <button
+                        className="secondary"
+                        disabled={busy}
+                        onClick={() =>
+                          act(async () => {
+                            await request("/connections/check", "POST", {});
+                          }, "Gmail provider verification updated; review the connection result above")
+                        }
+                      >
+                        Verify Gmail connection
+                      </button>
                     )}
-                  </div>
-                ))}
-                <p className="helper">
-                  Reply access permits reading mailbox threads to stop
-                  follow-ups. You review the provider consent screen. Microsoft
-                  users can also remove this app's consent in their Microsoft
-                  account.
-                </p>
-                {state.connections.map((account) => (
-                  <div className="provider" key={account.id}>
-                    <strong>{account.address}</strong>
-                    <span>
-                      {account.provider === "gmail" ? "Gmail " : "Outlook "}
-                      {account.status}
-                    </span>
-                    {state.mailbox_checks
-                      ?.filter((k) => k.connection_id === account.id)
-                      .map((k) => (
-                        <small key={k.connection_id}>
-                          {k.status}: {k.detail}
-                        </small>
-                      ))}
+                    <h3>Notifications</h3>
+                    {state.notifications.map((item) => (
+                      <p key={item.id}>
+                        <strong>{item.kind}: </strong>
+                        {item.message}
+                      </p>
+                    ))}
+                    {!state.notifications.length && (
+                      <p>No account or delivery notifications.</p>
+                    )}
                     <button
                       className="secondary"
                       disabled={busy}
                       onClick={() =>
                         act(async () => {
-                          await request(
-                            `/connections/${account.id}/disconnect`,
-                            "POST",
-                          );
-                        }, "Account disconnected; outstanding messages cancelled")
+                          await request("/notifications/read", "POST");
+                        }, "Notifications marked read")
                       }
                     >
-                      Disconnect
+                      Mark read
                     </button>
-                  </div>
-                ))}
-                {realWorkflow && (
-                  <div>
-                    <h3>
-                      Real sending{" "}
-                      {state.capabilities.live_email ? "enabled" : "disabled"}
-                    </h3>
-                    <p>
-                      {state.capabilities.production_outreach
-                        ? "Professor outreach activated by owner"
-                        : "Controlled testing: " +
-                          state.capabilities.test_recipients.join(", ")}
-                    </p>
-                    {state.capabilities.live_owner && (
-                      <>
-                        <p>
-                          Production activation requires a confirmed Gmail
-                          delivery to both test addresses and a detected reply
-                          to a test. Test delivery:{" "}
-                          {state.capabilities.activation.delivered
-                            ? "passed"
-                            : "pending"}
-                          . Reply detection:{" "}
-                          {state.capabilities.activation.reply_detected
-                            ? "passed"
-                            : "pending"}
-                          .
-                        </p>
-                        <button
-                          className="secondary"
-                          disabled={
-                            busy ||
-                            !state.capabilities.live_email ||
-                            (!state.capabilities.production_outreach &&
-                              !state.capabilities.activation.can_activate)
-                          }
-                          onClick={() => {
-                            if (
-                              !window.confirm(
-                                state.capabilities.production_outreach
-                                  ? "Restrict future sends to controlled test recipients?"
-                                  : "Enable real outreach to professor addresses you explicitly enter/import and approve? This does not approve any messages.",
-                              )
-                            )
-                              return;
-                            act(async () => {
-                              await request("/outreach/mode", "POST", {
-                                production_enabled:
-                                  !state.capabilities.production_outreach,
-                                confirmed: true,
-                              });
-                            }, "Sending mode updated; message approval is still required");
-                          }}
-                        >
-                          {state.capabilities.production_outreach
-                            ? "Return to controlled testing"
-                            : "Activate professor outreach"}
-                        </button>
-                      </>
-                    )}
-                  </div>
-                )}
-                <h3>AI provider</h3>
-                <p>
-                  {state.capabilities.ai === "groq"
-                    ? "Groq configured with safe template fallback"
-                    : "Editable factual templates"}{" "}
-                  ? {state.ai_usage.requests} AI requests /{" "}
-                  {state.ai_usage.tokens} tokens used
-                </p>
-                <p className="helper">
-                  AI selects from factual templates; it does not invent
-                  research, publications, affiliations or funding. Only
-                  student-entered profile and professor fields are used. Always
-                  preview and edit before approval.
-                </p>
-                <button
-                  className="secondary"
-                  disabled={
-                    busy ||
-                    !state.connections.some(
-                      (account) =>
-                        account.status === "connected" &&
-                        state.capabilities[account.provider] &&
-                        /gmail.readonly|Mail.Read/.test(account.scopes),
-                    )
-                  }
-                  onClick={() =>
-                    act(async () => {
-                      await request("/connections/sync", "POST");
-                    }, "Bounded reply check completed")
-                  }
-                >
-                  Check replies now
-                </button>
-                {realWorkflow && (
-                  <button
-                    className="secondary"
-                    disabled={busy}
-                    onClick={() =>
-                      act(async () => {
-                        await request("/connections/check", "POST", {});
-                      }, "Gmail provider verification updated; review the connection result above")
-                    }
-                  >
-                    Verify Gmail connection
-                  </button>
-                )}
-                <h3>Notifications</h3>
-                {state.notifications.map((item) => (
-                  <p key={item.id}>
-                    <strong>{item.kind}: </strong>
-                    {item.message}
-                  </p>
-                ))}
-                {!state.notifications.length && (
-                  <p>No account or delivery notifications.</p>
-                )}
-                <button
-                  className="secondary"
-                  disabled={busy}
-                  onClick={() =>
-                    act(async () => {
-                      await request("/notifications/read", "POST");
-                    }, "Notifications marked read")
-                  }
-                >
-                  Mark read
-                </button>
-                <h3>Recipient opt-out</h3>
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    const form = e.currentTarget;
-                    const address = String(new FormData(form).get("address"));
-                    act(async () => {
-                      await request("/suppressions", "POST", { address });
-                      form.reset();
-                    }, "Recipient blocked from live sending and follow-ups");
-                  }}
-                >
-                  <input
-                    type="email"
-                    name="address"
-                    required
-                    placeholder="Recipient who declined or opted out"
-                  />
-                  <button className="secondary" disabled={busy}>
-                    Block recipient
-                  </button>
-                </form>
-              </section>
-              <section className="panel settings-card">
-                <h2>Outreach controls</h2>
-                <p>
-                  Controls apply to your student account and are checked by
-                  every scheduler run.
-                </p>
-                <div className="control-buttons">
-                  <button
-                    className="secondary"
-                    disabled={busy}
-                    onClick={() =>
-                      act(
-                        async () => {
-                          await request("/control", "POST", {
-                            action: profile.paused ? "resume" : "pause",
-                          });
-                        },
-                        profile.paused ? "Outreach resumed" : "Outreach paused",
-                      )
-                    }
-                  >
-                    {profile.paused ? <Play size={17} /> : <Pause size={17} />}{" "}
-                    {profile.paused ? "Resume outreach" : "Pause outreach"}
-                  </button>
-                  <button
-                    className="danger"
-                    disabled={busy}
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          "Stop outreach and cancel all your outstanding drafts and scheduled messages?",
-                        )
-                      )
+                    <h3>Recipient opt-out</h3>
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        const form = e.currentTarget;
+                        const address = String(
+                          new FormData(form).get("address"),
+                        );
                         act(async () => {
-                          await request("/control", "POST", { action: "stop" });
-                        }, "Outreach stopped; outstanding messages cancelled");
-                    }}
-                  >
-                    <Square size={16} /> Stop all outreach
-                  </button>
-                </div>
-                <div className="helper">
-                  Pause preserves the queue. Stop cancels outstanding messages.
-                  Resuming does not restore cancelled messages.
-                </div>
-                <h3>Account</h3>
-                <p>{state.account.email}</p>
-                <span className="security-note">
-                  <ShieldCheck size={15} /> Private documents · Isolated student
-                  records
-                </span>
-              </section>
+                          await request("/suppressions", "POST", { address });
+                          form.reset();
+                        }, "Recipient blocked from live sending and follow-ups");
+                      }}
+                    >
+                      <input
+                        type="email"
+                        name="address"
+                        required
+                        placeholder="Recipient who declined or opted out"
+                      />
+                      <button className="secondary" disabled={busy}>
+                        Block recipient
+                      </button>
+                    </form>
+                  </section>
+                  <section className="panel settings-card">
+                    <h2>Outreach controls</h2>
+                    <p>
+                      Controls apply to your student account and are checked by
+                      every scheduler run.
+                    </p>
+                    <div className="control-buttons">
+                      <button
+                        className="secondary"
+                        disabled={busy}
+                        onClick={() =>
+                          act(
+                            async () => {
+                              await request("/control", "POST", {
+                                action: profile.paused ? "resume" : "pause",
+                              });
+                            },
+                            profile.paused
+                              ? "Outreach resumed"
+                              : "Outreach paused",
+                          )
+                        }
+                      >
+                        {profile.paused ? (
+                          <Play size={17} />
+                        ) : (
+                          <Pause size={17} />
+                        )}{" "}
+                        {profile.paused ? "Resume outreach" : "Pause outreach"}
+                      </button>
+                      <button
+                        className="danger"
+                        disabled={busy}
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              "Stop outreach and cancel all your outstanding drafts and scheduled messages?",
+                            )
+                          )
+                            act(async () => {
+                              await request("/control", "POST", {
+                                action: "stop",
+                              });
+                            }, "Outreach stopped; outstanding messages cancelled");
+                        }}
+                      >
+                        <Square size={16} /> Stop all outreach
+                      </button>
+                    </div>
+                    <div className="helper">
+                      Pause preserves the queue. Stop cancels outstanding
+                      messages. Resuming does not restore cancelled messages.
+                    </div>
+                    <h3>Account</h3>
+                    <p>{state.account.email}</p>
+                    <span className="security-note">
+                      <ShieldCheck size={15} /> Private documents · Isolated
+                      student records
+                    </span>
+                  </section>
+                </>
+              )}
             </div>
           )}
           {view === "Audit history" && (
@@ -2391,6 +2446,21 @@ export default function Home() {
                   </small>
                 </div>
               ))}
+            </section>
+          )}
+          {limitedWorkspace && (
+            <section className="panel" role="status">
+              <strong>Email Not Verified</strong>
+              <p>
+                You can manage your academic profile, professors and private
+                documents. Email connections, outreach and campaign approvals
+                require verified access.
+              </p>
+              <p>
+                {mailReady
+                  ? "Request an email verification link in Settings."
+                  : "Verification emails are currently unavailable. Your private workspace remains accessible."}
+              </p>
             </section>
           )}
           <footer className="main-footer">

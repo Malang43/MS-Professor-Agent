@@ -71,13 +71,13 @@ describe("account lifecycle", () => {
       ).toBe(400);
     expect(h.db.prepare("SELECT COUNT(*) n FROM users").get()!.n).toBe(0);
   });
-  it("stores hashed verification tokens and gates new users without leaking token data", async () => {
+  it("stores hashed verification tokens and permits only limited workspace access before verification", async () => {
     const session = await create();
     expect((await h.request("/state", "GET", undefined, session)).status).toBe(
-      403,
+      200,
     );
     expect((await h.request("/professors", "POST", [], session)).status).toBe(
-      403,
+      400,
     );
     const row = h.db.prepare("SELECT * FROM account_tokens").get()!;
     expect(row.token_hash).toBe(await hash(token(links[0])));
@@ -152,12 +152,12 @@ describe("account lifecycle", () => {
     expect(a.headers.get("Set-Cookie")).toBe(null);
     expect(b.headers.get("Set-Cookie")).toBe(null);
   });
-  it("fails closed on missing delivery without falsely verifying", async () => {
+  it("permits limited workspace without delivery and never falsely verifies", async () => {
     h.env.MAIL_DELIVERY_ENABLED = "false";
     const session = await create();
     expect(links).toHaveLength(0);
     expect((await h.request("/state", "GET", undefined, session)).status).toBe(
-      403,
+      200,
     );
     const me = (await (
       await h.request("/auth/me", "GET", undefined, session)
@@ -688,7 +688,7 @@ it("fails closed until sender verification is explicitly configured", async () =
     0,
   );
   expect((await h.request("/state", "GET", undefined, session)).status).toBe(
-    403,
+    200,
   );
 });
 it("rolls verification and link consumption back together on database failure", async () => {
