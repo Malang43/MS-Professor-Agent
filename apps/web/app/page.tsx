@@ -1222,7 +1222,9 @@ export default function Home() {
                     label: "Emails sent",
                     value: counts.sent,
                     icon: Send,
-                    note: "Simulated deliveries",
+                    note: state.capabilities.mock_delivery
+                      ? "Simulated deliveries"
+                      : "Confirmed deliveries",
                   },
                   {
                     label: "Replies recorded",
@@ -3013,16 +3015,50 @@ export default function Home() {
                     return (
                       <div>
                         <h3>
-                          Inactive follow-up proposal: {proposal.days} days
-                          after confirmed sending
+                          {review.status === "replied"
+                            ? "Cancelled due to reply ? inactive proposal:"
+                            : "Proposed but inactive:"}{" "}
+                          {proposal.days} days after confirmed sending
                         </h3>
                         <strong>{proposal.subject}</strong>
                         <pre className="email-preview">{proposal.body}</pre>
                         <p className="helper">
                           {review.status === "draft"
                             ? "Select the combined initial-email and automatic-follow-up option in this campaign review to authorize it once. Initial-only approval leaves it inactive."
-                            : "This follow-up was not authorized with the initial campaign. The original approval cannot be expanded; a manual follow-up requires a new explicitly reviewed message."}
+                            : "This follow-up was not authorized with the initial campaign. The original approval is retained. You can separately approve this exact conditional follow-up below."}
                         </p>
+                        {review.status === "sent" && (
+                          <p className="helper">
+                            Due{" "}
+                            {new Date(
+                              Date.parse(review.sent_at!) +
+                                proposal.days * 86400000,
+                            ).toLocaleString("en-PK", {
+                              timeZone: review.timezone,
+                            })}{" "}
+                            ({review.timezone}). If already due, approval
+                            permits sending on the next eligible cron run after
+                            a fresh reply check.
+                          </p>
+                        )}
+                        {review.status === "sent" && (
+                          <button
+                            className="primary"
+                            disabled={busy}
+                            onClick={() =>
+                              act(async () => {
+                                await request(
+                                  `/messages/${review.id}/approve-followup`,
+                                  "POST",
+                                  { confirmed: true, ...proposal },
+                                );
+                                setReview(null);
+                              })
+                            }
+                          >
+                            Approve this exact automatic follow-up once
+                          </button>
+                        )}
                         {review.status === "draft" && (
                           <button
                             className="secondary"

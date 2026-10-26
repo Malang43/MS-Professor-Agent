@@ -300,9 +300,33 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
           bytes: await documentBytes(env, doc),
         });
       }
+      if (row.parent_id) {
+        const checkedAfter = Date.now();
+        await env.DB.prepare(
+          "UPDATE transports SET sync_checked_at=0 WHERE message_id=?",
+        )
+          .bind(row.parent_id)
+          .run();
+        await syncReplies(env, network, row.user_id, row.parent_id);
+        const parent = await env.DB.prepare(
+          "SELECT m.status,t.sync_checked_at,t.sync_cursor FROM messages m JOIN transports t ON t.message_id=m.id WHERE m.id=? AND m.user_id=?",
+        )
+          .bind(row.parent_id, row.user_id)
+          .first<any>();
+        if (
+          !parent ||
+          parent.status !== "sent" ||
+          parent.sync_cursor ||
+          parent.sync_checked_at < checkedAfter
+        )
+          throw new HttpError(
+            503,
+            "A fresh complete reply check is required before sending.",
+          );
+      }
       // Last D1 fence before the external side effect; do not trust stale approval/account state.
       const fenced = await env.DB.prepare(
-        `UPDATE transports SET state='submitting',attempts=attempts+1 WHERE message_id=? AND lease=? AND state='leased' AND EXISTS(SELECT 1 FROM messages m JOIN profiles p ON p.user_id=m.user_id JOIN connections c ON c.id=? WHERE m.id=? AND m.status='pending' AND m.live_ready=1 AND NOT EXISTS(SELECT 1 FROM professors pr WHERE pr.id=m.professor_id AND pr.deleted_at IS NOT NULL) AND m.approved=1 AND (m.mode!='auto' OR m.authorized=1) AND p.paused=0 AND p.stopped=0 AND c.status='connected') AND NOT EXISTS(SELECT 1 FROM suppressions WHERE user_id=? AND address=?) RETURNING message_id`,
+        `UPDATE transports SET state='submitting',attempts=attempts+1 WHERE message_id=? AND lease=? AND state='leased' AND EXISTS(SELECT 1 FROM messages m JOIN profiles p ON p.user_id=m.user_id JOIN connections c ON c.id=? WHERE m.id=? AND m.status='pending' AND m.live_ready=1 AND NOT EXISTS(SELECT 1 FROM professors pr WHERE pr.id=m.professor_id AND pr.deleted_at IS NOT NULL) AND m.approved=1 AND (m.mode!='auto' OR m.authorized=1) AND p.paused=0 AND p.stopped=0 AND c.status='connected' AND (m.parent_id IS NULL OR EXISTS(SELECT 1 FROM messages parent WHERE parent.id=m.parent_id AND parent.status='sent'))) AND NOT EXISTS(SELECT 1 FROM suppressions WHERE user_id=? AND address=?) RETURNING message_id`,
       )
         .bind(
           row.message_id,
@@ -633,6 +657,9 @@ export async function queueFollowups(env: Env) {
         env.DB.prepare(
           "INSERT INTO message_authorizations(message_id,user_id,campaign_id,kind,parent_id,snapshot,authorized_at,followup_authorized) SELECT m.id,m.user_id,a.campaign_id,'followup',?,json_object('initial',json(?),'sending_account_id',?,'scheduled_at',m.scheduled_at,'timezone',m.timezone,'parent_authorization',a.message_id,'followup',NULL,'condition','only_if_no_reply','maximum_followups',0),a.authorized_at,0 FROM messages m JOIN message_authorizations a ON a.message_id=m.parent_id WHERE m.id=? AND a.followup_authorized=1",
         ).bind(row.message_id, JSON.stringify(next), row.connection_id, id),
+        env.DB.prepare(
+          "INSERT INTO message_authorizations(message_id,user_id,campaign_id,kind,parent_id,snapshot,authorized_at,followup_authorized) SELECT m.id,m.user_id,'separate:' || f.message_id,'followup',m.parent_id,json_object('initial',json(?),'sending_account_id',?,'parent_authorization',f.message_id,'followup',NULL,'condition','only_if_no_reply','maximum_followups',0),f.authorized_at,0 FROM messages m JOIN followup_approvals f ON f.message_id=m.parent_id WHERE m.id=? AND NOT EXISTS(SELECT 1 FROM message_authorizations WHERE message_id=m.id)",
+        ).bind(JSON.stringify(next), row.connection_id, id),
         ...snapshot.attachments.map((doc) =>
           env.DB.prepare(
             "INSERT INTO message_attachments(message_id,document_id,user_id) SELECT id,?,user_id FROM messages WHERE id=?",

@@ -1,5 +1,8 @@
 export interface Env {
   DB: D1Database;
+  TURNSTILE_ENABLED?: string;
+  TURNSTILE_SITE_KEY?: string;
+  TURNSTILE_SECRET_KEY?: string;
   MAIL_PROVIDER?: string;
   MAIL_DELIVERY_ENABLED?: string;
   MAIL_FREE_PLAN_CONFIRMED?: string;

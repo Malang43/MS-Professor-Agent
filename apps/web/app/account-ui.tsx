@@ -1,4 +1,10 @@
 "use client";
+import {
+  Turnstile,
+  PasskeyLogin,
+  RecoveryForm,
+  SecuritySettings,
+} from "./security-ui";
 import { useState, type FormEvent } from "react";
 import {
   GraduationCap,
@@ -117,6 +123,7 @@ export function AuthPanel({
         const result = await api("/auth/signup", "POST", {
           ...data,
           accept_terms: data.accept_terms === "on",
+          turnstile_token: data["cf-turnstile-response"],
         });
         setMessage(result.message);
         setMode("login");
@@ -315,6 +322,9 @@ export function AuthPanel({
                   link alone does not change your account.
                 </p>
               )}
+              {!intent && mode === "signup" && (
+                <Turnstile key={busy ? "submitting" : "ready"} />
+              )}
               <button className="primary full" disabled={busy}>
                 {busy
                   ? "Please wait…"
@@ -340,6 +350,10 @@ export function AuthPanel({
               )}
             </form>
           )}
+          {!intent && mode === "login" && (
+            <PasskeyLogin api={api} onComplete={onComplete} />
+          )}
+          {!intent && mode === "forgot" && <RecoveryForm api={api} />}
           <p className="security-note">
             <ShieldCheck size={16} />
             Private by design. Sending stays under your control.
@@ -487,7 +501,7 @@ export function AccountSettings({
             ? "Email verified"
             : account.legacy_access
               ? "Existing account · email not yet verified"
-              : "Verification pending"}
+              : "Email Not Verified"}
         </span>
       </p>
       {!account.email_verified_at && (
@@ -548,6 +562,7 @@ export function AccountSettings({
         </button>
       </form>
       <hr />
+      <SecuritySettings api={api} />
       <h3>Password & sessions</h3>
       <p>
         Changing your password signs out every device and invalidates pending

@@ -715,3 +715,119 @@ describe("one-time campaign lifecycle", () => {
     expect((await approve([draft.id], true)).status).toBe(200);
   });
 });
+
+describe("separate approval of inactive follow-up", () => {
+  async function inactive() {
+    const [draft] = await importRows();
+    expect((await approve([draft.id], false)).status).toBe(200);
+    const p = provider();
+    await runLiveJobs(h.env, p.network as any);
+    vi.stubGlobal("fetch", p.network);
+    return { draft, p };
+  }
+  const consent = {
+    confirmed: true,
+    days: 1,
+    subject: row.follow_up_subject,
+    body: row.follow_up_body,
+  };
+  it("retains initial-only campaign scope, schedules once from confirmed send time and authorizes only the exact proposal", async () => {
+    const { draft, p } = await inactive();
+    const before = h.db
+      .prepare("SELECT * FROM message_authorizations WHERE message_id=?")
+      .get(draft.id);
+    const campaigns = h.db.prepare("SELECT * FROM campaign_approvals").all();
+    const r = await h.request(
+      `/messages/${draft.id}/approve-followup`,
+      "POST",
+      consent,
+      owner.session,
+    );
+    expect(r.status).toBe(200);
+    expect(
+      h.db
+        .prepare("SELECT * FROM message_authorizations WHERE message_id=?")
+        .get(draft.id),
+    ).toEqual(before);
+    expect(h.db.prepare("SELECT * FROM campaign_approvals").all()).toEqual(
+      campaigns,
+    );
+    const rule: any = h.db
+        .prepare("SELECT * FROM automation WHERE message_id=?")
+        .get(draft.id),
+      m: any = h.db
+        .prepare("SELECT sent_at FROM messages WHERE id=?")
+        .get(draft.id);
+    expect(rule.due_at).toBe(Date.parse(m.sent_at) + 86400000);
+    expect(
+      (
+        await h.request(
+          `/messages/${draft.id}/approve-followup`,
+          "POST",
+          consent,
+          owner.session,
+        )
+      ).status,
+    ).toBe(409);
+    advance(86400000 + 1000);
+    await syncReplies(h.env, p.network as any, owner.id, draft.id);
+    await queueFollowups(h.env);
+    await queueFollowups(h.env);
+    expect(
+      h.db
+        .prepare("SELECT count(*) n FROM messages WHERE parent_id=?")
+        .get(draft.id)!.n,
+    ).toBe(1);
+    const child: any = h.db
+      .prepare(
+        "SELECT a.* FROM message_authorizations a JOIN messages m ON m.id=a.message_id WHERE m.parent_id=?",
+      )
+      .get(draft.id);
+    expect(child.kind).toBe("followup");
+    expect(child.campaign_id).toBe("separate:" + draft.id);
+  });
+  it("rejects changed content, cross-user access and replies before approval", async () => {
+    const { draft } = await inactive();
+    expect(
+      (
+        await h.request(
+          `/messages/${draft.id}/approve-followup`,
+          "POST",
+          { ...consent, body: "unreviewed" },
+          owner.session,
+        )
+      ).status,
+    ).toBe(409);
+    const other = await h.user("other@example.com");
+    expect(
+      (
+        await h.request(
+          `/messages/${draft.id}/approve-followup`,
+          "POST",
+          consent,
+          other.session,
+        )
+      ).status,
+    ).toBe(409);
+    vi.stubGlobal("fetch", provider(true).network);
+    // Synthetic reply must postdate the synthetic send.
+    advance(2000);
+    expect(
+      (
+        await h.request(
+          `/messages/${draft.id}/approve-followup`,
+          "POST",
+          consent,
+          owner.session,
+        )
+      ).status,
+    ).toBe(409);
+    expect(
+      h.db.prepare("SELECT count(*) n FROM followup_approvals").get()!.n,
+    ).toBe(0);
+    expect(
+      h.db.prepare("SELECT status FROM messages WHERE id=?").get(draft.id)!
+        .status,
+    ).toBe("replied");
+  });
+});

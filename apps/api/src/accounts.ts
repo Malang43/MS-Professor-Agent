@@ -1,3 +1,4 @@
+import { turnstileReady, verifyTurnstile } from "./turnstile";
 import {
   mailReady,
   sendAccountLink,
@@ -42,6 +43,10 @@ export async function accountPublic(
   env: Env,
 ): Promise<Response | null> {
   const path = new URL(req.url).pathname;
+  if (path === "/api/auth/config" && req.method === "GET")
+    return Response.json({
+      turnstile_site_key: turnstileReady(env) ? env.TURNSTILE_SITE_KEY : null,
+    });
   if (
     ![
       "/api/auth/signup",
@@ -74,6 +79,12 @@ export async function accountPublic(
       env,
       "signup:" + (await hash(req.headers.get("CF-Connecting-IP") || "local")),
       10,
+    );
+    await verifyTurnstile(
+      req,
+      env,
+      z.object({ turnstile_token: z.string().max(2048).optional() }).parse(data)
+        .turnstile_token,
     );
     const digest = await passwordHash(input.password),
       user = await env.DB.prepare("SELECT id,email FROM users WHERE email=?")
@@ -335,6 +346,9 @@ export async function accountPrivate(
         env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(user),
         env.DB.prepare("DELETE FROM oauth_states WHERE user_id=?").bind(user),
         env.DB.prepare("DELETE FROM account_tokens WHERE user_id=?").bind(user),
+        env.DB.prepare("DELETE FROM auth_challenges WHERE user_id=?").bind(
+          user,
+        ),
       ]);
     } else {
       if (input.confirmation !== "DELETE MY ACCOUNT")
@@ -356,6 +370,9 @@ export async function accountPrivate(
           user,
         ),
         ...[
+          "recovery_codes",
+          "passkeys",
+          "auth_challenges",
           "sessions",
           "oauth_states",
           "account_tokens",

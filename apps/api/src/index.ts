@@ -1,3 +1,5 @@
+import { approveFollowup } from "./followup-approval";
+import { securityPublic, securityPrivate } from "./security";
 import { z } from "zod";
 import { recordAction } from "./records";
 import { approveGmail, retryGmail } from "./live-approval";
@@ -174,6 +176,8 @@ async function route(req: Request, env: Env): Promise<Response> {
   const callback = path.match(/^\/api\/oauth\/(gmail|outlook)\/callback$/);
   if (callback && method === "GET")
     return finishOAuth(env, req, callback[1] as "gmail" | "outlook");
+  const publicSecurity = await securityPublic(req, env);
+  if (publicSecurity) return publicSecurity;
   const publicAccount = await accountPublic(req, env);
   if (publicAccount) return publicAccount;
   const user = await authenticated(req, env);
@@ -194,9 +198,16 @@ async function route(req: Request, env: Env): Promise<Response> {
       },
     });
   }
+  const privateSecurity = await securityPrivate(req, env, user);
+  if (privateSecurity) return privateSecurity;
   const privateAccount = await accountPrivate(req, env, user);
   if (privateAccount) return privateAccount;
   await requireVerified(env, user);
+  const followupApproval = path.match(
+    /^\/api\/messages\/([^/]+)\/approve-followup$/,
+  );
+  if (followupApproval && method === "POST")
+    return approveFollowup(env, user, followupApproval[1], await req.json());
   const recordResponse = await recordAction(req, env, user, path, method);
   if (recordResponse) return recordResponse;
   if (path === "/api/outreach/mode" && method === "POST") {
@@ -425,6 +436,11 @@ async function route(req: Request, env: Env): Promise<Response> {
           .bind(user)
           .all()
       ).results,
+      followup_approvals: (
+        await env.DB.prepare("SELECT * FROM followup_approvals WHERE user_id=?")
+          .bind(user)
+          .all()
+      ).results,
       ai_usage: await env.DB.prepare(
         `SELECT COALESCE(SUM(requests),0) requests,COALESCE(SUM(tokens),0) tokens FROM ai_usage WHERE user_id=? AND created_at>=date('now')`,
       )
@@ -583,7 +599,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
   if (path === "/api/imports/drafts" && method === "POST") {
     const input = z
-      .array(z.record(z.string()))
+      .array(z.record(z.string(), z.string()))
       .min(1)
       .max(25)
       .parse(await req.json());

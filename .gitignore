@@ -84,3 +84,4 @@ tokens/
 
 # Public synthetic workbook; private Excel files remain ignored.
 !/apps/web/public/professors-email-template.xlsx
+/auth-release-build/
