@@ -53,7 +53,7 @@ describe("Excel-to-outbox import", () => {
       user.session,
     );
     expect(result.status).toBe(200);
-    expect(await result.json()).toEqual({ created: 25, skipped: 0 });
+    expect(await result.json()).toMatchObject({ created: 25, skipped: 0 });
     expect(queries).toBeLessThan(50);
     expect(
       h.db
@@ -157,7 +157,7 @@ describe("Excel-to-outbox import", () => {
     const retry = await (
       await h.request("/imports/drafts", "POST", [row], user.session)
     ).json();
-    expect(retry).toEqual({ created: 0, skipped: 1 });
+    expect(retry).toMatchObject({ created: 0, skipped: 1 });
     expect(h.db.prepare("SELECT count(*) n FROM messages").get()!.n).toBe(1);
     expect(h.db.prepare("SELECT count(*) n FROM professors").get()!.n).toBe(1);
   });

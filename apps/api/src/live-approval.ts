@@ -11,6 +11,12 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
   const input = z
     .object({
       ids: z.array(z.string().uuid()).min(1).max(25),
+      name: z
+        .string()
+        .trim()
+        .min(1)
+        .max(160)
+        .default("Professor outreach campaign"),
       sending_account_id: z.string().uuid(),
       authorize_followups: z.boolean().default(false),
     })
@@ -127,24 +133,25 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
           };
     let followup = null;
     if (input.authorize_followups) {
-      if (!m.effective_followup)
+      if (!m.effective_followup && m.followup_issue)
         throw new HttpError(
           400,
           "Missing follow-up content for " +
             recipient +
             ". Supply its exact subject, body and 1-30 day delay, or choose initial emails only.",
         );
-      followup = z
-        .object({
-          days: z.number().int().min(1).max(30),
-          subject: z
-            .string()
-            .min(1)
-            .max(500)
-            .refine((v) => !/[\r\n]/.test(v)),
-          body: z.string().min(1).max(20000),
-        })
-        .parse(JSON.parse(m.effective_followup));
+      if (m.effective_followup)
+        followup = z
+          .object({
+            days: z.number().int().min(1).max(30),
+            subject: z
+              .string()
+              .min(1)
+              .max(500)
+              .refine((v) => !/[\r\n]/.test(v)),
+            body: z.string().min(1).max(20000),
+          })
+          .parse(JSON.parse(m.effective_followup));
     }
     if (followup && !/gmail.readonly/.test(connection.scopes))
       throw new HttpError(
@@ -173,7 +180,7 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
   try {
     await env.DB.batch([
       env.DB.prepare(
-        "INSERT INTO campaign_approvals(id,user_id,approved_at,initial_count,followup_count,sending_account_id,selection) VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO campaign_approvals(id,user_id,approved_at,initial_count,followup_count,sending_account_id,selection,name) VALUES(?,?,?,?,?,?,?,?)",
       ).bind(
         campaignId,
         user,
@@ -182,6 +189,7 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
         plans.filter((p) => p.followup).length,
         input.sending_account_id,
         payload,
+        input.name,
       ),
       env.DB.prepare(
         "UPDATE messages SET approved=1,authorized=CASE WHEN mode='auto' THEN 1 ELSE authorized END,status='pending',live_ready=1,error=NULL,live_fingerprint=(SELECT json_extract(value,'$.fingerprint') FROM json_each(?) WHERE json_extract(value,'$.id')=messages.id) WHERE user_id=? AND id IN (SELECT json_extract(value,'$.id') FROM json_each(?)) AND (status='draft' OR (status='pending' AND live_ready=0))",
@@ -225,6 +233,7 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
     ok: true,
     scheduled: ids.length,
     campaign_id: campaignId,
+    name: input.name,
     authorized_followups: plans.filter((p) => p.followup).length,
     total_messages: ids.length + plans.filter((p) => p.followup).length,
   });

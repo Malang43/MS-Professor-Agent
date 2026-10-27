@@ -831,3 +831,53 @@ describe("separate approval of inactive follow-up", () => {
     ).toBe("replied");
   });
 });
+it("authorizes mixed campaigns with optional exact follow-ups and newly reimported professors", async () => {
+  const drafts = await importRows([
+    row,
+    {
+      ...row,
+      email: "second@example.com",
+      follow_up_days: "",
+      follow_up_subject: "",
+      follow_up_body: "",
+    },
+  ]);
+  await h.request(
+    `/professors/${drafts[0].professor_id}/delete`,
+    "POST",
+    { confirmed: true },
+    owner.session,
+  );
+  const response = await h.request(
+    "/imports/drafts",
+    "POST",
+    [{ ...row, subject: "Fresh approved inquiry" }],
+    owner.session,
+  );
+  expect(response.status).toBe(200);
+  const fresh = ((await response.json()) as any).drafts[0];
+  expect(fresh.professor_id).not.toBe(drafts[0].professor_id);
+  const result = await approve([fresh.id, drafts[1].id], true);
+  expect(result.status).toBe(200);
+  expect(await result.json()).toMatchObject({
+    scheduled: 2,
+    authorized_followups: 1,
+    total_messages: 3,
+  });
+  expect(
+    h.db
+      .prepare("SELECT approved,status FROM messages WHERE id=?")
+      .get(drafts[0].id),
+  ).toMatchObject({ approved: 0, status: "cancelled" });
+  expect(h.db.prepare("SELECT count(*) n FROM automation").get()!.n).toBe(1);
+  expect(
+    (
+      await h.request(
+        `/messages/${fresh.id}`,
+        "PUT",
+        { subject: "Changed", body: "No" },
+        owner.session,
+      )
+    ).status,
+  ).toBe(409);
+});

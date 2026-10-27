@@ -23,19 +23,19 @@ export function spreadsheetDraft(
   };
   row = { ...row };
   for (const field of ["days", "subject", "body"]) {
-    const oldValue = row["followup_" + field]?.trim(),
-      newValue = row["follow_up_" + field]?.trim();
+    const oldValue = row["followup_" + field],
+      newValue = row["follow_up_" + field];
     if (oldValue && newValue && oldValue !== newValue)
       fail("conflicting followup_ and follow_up_ columns: " + field);
     row["followup_" + field] = newValue || oldValue || "";
   }
-  const subject = row.subject?.trim() || "",
-    body = row.body?.trim() || "";
+  const subject = row.subject || "",
+    body = row.body || "";
   if (
-    !subject ||
+    !subject.trim() ||
     subject.length > 500 ||
     /[\r\n]/.test(subject) ||
-    !body ||
+    !body.trim() ||
     body.length > 20000
   )
     fail(
@@ -63,8 +63,8 @@ export function spreadsheetDraft(
     followup_draft: SpreadsheetDraft["followup_draft"];
   if (row.followup_days || row.followup_subject || row.followup_body) {
     const days = Number(row.followup_days),
-      subject = row.followup_subject?.trim() || "",
-      body = row.followup_body?.trim() || "";
+      subject = row.followup_subject || "",
+      body = row.followup_body || "";
     if (
       (row.followup_days &&
         (!Number.isInteger(days) || days < 1 || days > 30)) ||

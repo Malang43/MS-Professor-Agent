@@ -33,6 +33,7 @@ import {
   X,
   History,
 } from "lucide-react";
+import { ImportWizard } from "./import-wizard";
 import Papa from "papaparse";
 import readXlsxFile from "read-excel-file";
 import { spreadsheetDraft } from "../../../shared/spreadsheet";
@@ -338,7 +339,9 @@ export default function Home() {
     attachments: [] as string[],
   });
   const [draftWarning, setDraftWarning] = useState("");
-  const [includeImportDrafts, setIncludeImportDrafts] = useState(false);
+  const [importRows, setImportRows] = useState<Record<string, string>[] | null>(
+    null,
+  );
   async function uploadPrivate(file: File) {
     if (file.size > 2 * 1024 * 1024)
       throw new Error("Document limit is 2 MiB.");
@@ -477,9 +480,7 @@ export default function Home() {
         .slice(1)
         .filter((r) => r.some(Boolean))
         .map((row) =>
-          Object.fromEntries(
-            headers.map((h, i) => [h, String(row[i] ?? "").trim()]),
-          ),
+          Object.fromEntries(headers.map((h, i) => [h, String(row[i] ?? "")])),
         );
     } else {
       const parsed = Papa.parse<Record<string, string>>(await file.text(), {
@@ -493,20 +494,31 @@ export default function Home() {
     }
     if (!rows.length || rows.length > 500)
       throw new Error("Import between 1 and 500 professors");
-    if (
-      !state?.capabilities.workspace_limited &&
-      (includeImportDrafts ||
-        rows.some((r) => r.subject || r.body || r.scheduled_at))
-    ) {
-      if (rows.length > 25)
+    if (!state?.capabilities.workspace_limited) {
+      if (
+        rows.length > 25 &&
+        rows.some((r) => r.subject || r.body || r.scheduled_at)
+      )
         throw new Error(
-          "Import at most 25 fully specified draft emails at once. Professor-only imports still support 500 rows.",
+          "Campaigns support up to 25 rows. Professor-only imports support 500.",
         );
-      rows.forEach((row, i) => spreadsheetDraft(row, i, true));
-      const result = await request("/imports/drafts", "POST", rows);
-      setNotice(
-        `${result.created} drafts prepared; ${result.skipped} matching drafts skipped. Review recipients, choose Gmail, and approve separately. Follow-up proposals remain inactive until authorized.`,
-      );
+      if (rows.length > 25) {
+        await request(
+          "/professors",
+          "POST",
+          rows.map((r) => ({
+            name: r.name || "",
+            email: r.email || "",
+            university: r.university || "",
+            interests: r.interests || "",
+          })),
+        );
+        setNotice(
+          "Professor records imported; duplicate active addresses skipped.",
+        );
+        return;
+      }
+      setImportRows(rows);
       return;
     }
     const result = await request(
@@ -1150,6 +1162,15 @@ export default function Home() {
                 <Plus size={17} /> Compose outreach
               </button>
             )}
+            {importRows && (
+              <ImportWizard
+                rows={importRows}
+                api={request}
+                connections={state.connections}
+                onRefresh={refresh}
+                onClose={() => setImportRows(null)}
+              />
+            )}
             {view === "Professors" && (
               <button className="primary" onClick={() => setModal("professor")}>
                 <Plus size={17} /> Add professor
@@ -1478,18 +1499,6 @@ export default function Home() {
                   />
                 </label>
               </div>
-              <label className="checkbox-label import-option">
-                <input
-                  type="checkbox"
-                  disabled={limitedWorkspace}
-                  checked={includeImportDrafts}
-                  onChange={(e) => setIncludeImportDrafts(e.target.checked)}
-                />
-                Also prepare fully specified email drafts (up to 25 rows;
-                requires subject, body, scheduled_at; optional timezone and
-                follow-up rules). Review and batch approve separately; never
-                sends on import.
-              </label>
               <p className="helper">
                 <a href="/professors-email-template.xlsx" download>
                   Download Excel template
@@ -2458,7 +2467,7 @@ export default function Home() {
               </p>
               <p>
                 {mailReady
-                  ? "Request an email verification link in Settings."
+                  ? "Verification email delivery is currently unavailable. Your private workspace remains accessible; mailbox actions remain restricted."
                   : "Verification emails are currently unavailable. Your private workspace remains accessible."}
               </p>
             </section>

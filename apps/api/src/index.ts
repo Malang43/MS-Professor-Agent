@@ -1,3 +1,4 @@
+import { reimportDeleted } from "./reimport";
 import { workspaceAccess, limitedWorkspaceState } from "./workspace-access";
 import { approveFollowup } from "./followup-approval";
 import { securityPublic, securityPrivate } from "./security";
@@ -433,7 +434,7 @@ async function route(req: Request, env: Env): Promise<Response> {
       ).results,
       campaigns: (
         await env.DB.prepare(
-          "SELECT id,approved_at,initial_count,followup_count,sending_account_id FROM campaign_approvals WHERE user_id=? ORDER BY approved_at DESC",
+          "SELECT id,name,approved_at,initial_count,followup_count,sending_account_id FROM campaign_approvals WHERE user_id=? ORDER BY approved_at DESC",
         )
           .bind(user)
           .all()
@@ -558,12 +559,17 @@ async function route(req: Request, env: Env): Promise<Response> {
       .map(() => "SELECT value FROM json_each(?)")
       .join(" UNION ALL ");
     const results = await env.DB.batch([
+      ...reimportDeleted(
+        env,
+        user,
+        rows.map((r) => r.email),
+      ),
       env.DB.prepare(
         `INSERT OR IGNORE INTO professors(id,user_id,name,email,university,interests) SELECT json_extract(value,'$.id'),?,json_extract(value,'$.name'),json_extract(value,'$.email'),json_extract(value,'$.university'),json_extract(value,'$.interests') FROM (${source})`,
       ).bind(user, ...chunks),
       audit(env, user, "professors.imported"),
     ]);
-    return json({ imported: results[0].meta.changes });
+    return json({ imported: results[3].meta.changes });
   }
 
   if (path === "/api/draft" && method === "POST") {
@@ -599,12 +605,45 @@ async function route(req: Request, env: Env): Promise<Response> {
       );
     return json(draft);
   }
+  const editDraft = path.match(/^\/api\/messages\/([^/]+)$/);
+  if (editDraft && method === "PUT") {
+    const input = z
+      .object({
+        subject: z
+          .string()
+          .min(1)
+          .max(500)
+          .refine((v) => !/[\r\n]/.test(v)),
+        body: z.string().min(1).max(20000),
+      })
+      .parse(await req.json());
+    const result = await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE messages SET subject=?,body=?,import_key=NULL WHERE id=? AND user_id=? AND status='draft' AND approved=0 AND NOT EXISTS(SELECT 1 FROM transports WHERE message_id=messages.id) AND NOT EXISTS(SELECT 1 FROM message_authorizations WHERE message_id=messages.id)",
+      ).bind(input.subject, input.body, editDraft[1], user),
+      audit(env, user, "draft.edit_requested", editDraft[1]),
+    ]);
+    if (!result[0].meta.changes)
+      throw new HttpError(
+        409,
+        "Only an unapproved imported draft can be edited. Refresh its status.",
+      );
+    return json({ ok: true });
+  }
   if (path === "/api/imports/drafts" && method === "POST") {
     const input = z
       .array(z.record(z.string(), z.string()))
       .min(1)
       .max(25)
       .parse(await req.json());
+    const active = (
+      await env.DB.prepare(
+        "SELECT id,email FROM professors WHERE user_id=? AND deleted_at IS NULL",
+      )
+        .bind(user)
+        .all<{ id: string; email: string }>()
+    ).results;
+    const generation = new Map<string, string>();
     const rows = await Promise.all(
       input.map(async (row, i) => {
         let draft;
@@ -614,16 +653,23 @@ async function route(req: Request, env: Env): Promise<Response> {
           throw new HttpError(400, (error as Error).message);
         }
         professorSchema.parse(draft);
+        const professorId =
+          active.find((p) => p.email === draft.email)?.id ||
+          generation.get(draft.email) ||
+          id();
+        generation.set(draft.email, professorId);
         return {
           ...draft,
           id: id(),
-          professor_id: id(),
+          professor_id: professorId,
           import_key: await digest(
             JSON.stringify([
+              professorId,
               draft.email,
               draft.subject,
               draft.body,
               draft.scheduled_at,
+              draft.followup_proposal,
             ]),
           ),
         };
@@ -633,8 +679,20 @@ async function route(req: Request, env: Env): Promise<Response> {
     // may consume budget but can never create a second copy of the same email.
     await consume(env, `messages:${user}`, 50, rows.length);
     await consume(env, "messages:global", 500, rows.length);
+    const reimported = (
+      await env.DB.prepare(
+        "SELECT email FROM professors WHERE user_id=? AND deleted_at IS NOT NULL AND email IN (SELECT json_extract(value,'$.email') FROM json_each(?))",
+      )
+        .bind(user, JSON.stringify(rows))
+        .all<{ email: string }>()
+    ).results.map((r) => r.email);
     const payload = JSON.stringify(rows);
     const results = await env.DB.batch([
+      ...reimportDeleted(
+        env,
+        user,
+        rows.map((r) => r.email),
+      ),
       env.DB.prepare(
         `INSERT INTO professors(id,user_id,name,email,university,interests)
         SELECT json_extract(value,'$.professor_id'),?,json_extract(value,'$.name'),json_extract(value,'$.email'),json_extract(value,'$.university'),json_extract(value,'$.interests') FROM json_each(?) WHERE 1
@@ -644,13 +702,25 @@ async function route(req: Request, env: Env): Promise<Response> {
         `INSERT INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone,followup_proposal,import_key,approved_recipient,followup_issue,followup_draft)
         SELECT json_extract(j.value,'$.id'),?,p.id,json_extract(j.value,'$.subject'),json_extract(j.value,'$.body'),'manual',0,0,'draft',json_extract(j.value,'$.scheduled_at'),json_extract(j.value,'$.timezone'),json_extract(j.value,'$.followup_proposal'),json_extract(j.value,'$.import_key'),json_extract(j.value,'$.email'),json_extract(j.value,'$.followup_issue'),json_extract(j.value,'$.followup_draft')
         FROM json_each(?) j JOIN professors p ON p.user_id=? AND p.email=json_extract(j.value,'$.email')
-        WHERE NOT EXISTS(SELECT 1 FROM messages m WHERE m.user_id=p.user_id AND m.professor_id=p.id AND m.subject=json_extract(j.value,'$.subject') AND m.body=json_extract(j.value,'$.body') AND m.scheduled_at=json_extract(j.value,'$.scheduled_at'))
+        WHERE p.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.user_id=p.user_id AND m.professor_id=p.id AND m.subject=json_extract(j.value,'$.subject') AND m.body=json_extract(j.value,'$.body') AND m.scheduled_at=json_extract(j.value,'$.scheduled_at'))
         ON CONFLICT(user_id,import_key) WHERE import_key IS NOT NULL DO NOTHING`,
       ).bind(user, payload, user),
       audit(env, user, "spreadsheet.drafts_imported"),
     ]);
-    const created = results[1].meta.changes;
-    return json({ created, skipped: rows.length - created });
+    const created = results[4].meta.changes;
+    const drafts = (
+      await env.DB.prepare(
+        "SELECT m.id,m.professor_id,m.status,m.subject,m.body,m.scheduled_at,m.timezone,m.followup_proposal,m.followup_issue,m.followup_draft,p.email professor_email,p.name professor_name FROM messages m JOIN professors p ON p.id=m.professor_id WHERE m.user_id=? AND p.deleted_at IS NULL AND EXISTS(SELECT 1 FROM json_each(?) j WHERE p.email=json_extract(j.value,'$.email') AND m.subject=json_extract(j.value,'$.subject') AND m.body=json_extract(j.value,'$.body') AND m.scheduled_at=json_extract(j.value,'$.scheduled_at'))",
+      )
+        .bind(user, payload)
+        .all()
+    ).results;
+    return json({
+      created,
+      skipped: rows.length - created,
+      drafts,
+      reimported,
+    });
   }
   if (path === "/api/messages" && method === "POST") {
     const m = messageSchema.parse(await req.json());
@@ -833,11 +903,17 @@ async function route(req: Request, env: Env): Promise<Response> {
     const [, messageId, action] = messageMatch;
     const m = await owned(env, "messages", messageId, user);
     if (action === "cancel") {
-      if (!["draft", "pending"].includes(String(m.status)))
-        throw new Error("Invalid state");
+      // Cancellation is idempotent, including when initial mail already sent.
+      // Never changes delivery evidence or recalls accepted mail.
       await env.DB.batch([
         env.DB.prepare(
           "UPDATE messages SET status='cancelled' WHERE id=? AND user_id=? AND status IN ('draft','pending')",
+        ).bind(messageId, user),
+        env.DB.prepare(
+          "UPDATE automation SET generated=1,cancel_reason=COALESCE(cancel_reason,'manual') WHERE message_id=?",
+        ).bind(messageId),
+        env.DB.prepare(
+          "UPDATE messages SET status='cancelled' WHERE parent_id=? AND user_id=? AND status IN ('draft','pending')",
         ).bind(messageId, user),
         audit(env, user, "message.cancelled", messageId),
       ]);

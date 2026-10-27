@@ -208,6 +208,12 @@ export function AuthPanel({
             </div>
           )}
           <Notice text={error} error />
+          {error && mode === "login" && (
+            <p className="helper">
+              Try again, sign in with a registered passkey, or recover with a
+              saved recovery code below.
+            </p>
+          )}
           <Notice text={message} />
           {completed ? (
             <button
@@ -220,7 +226,7 @@ export function AuthPanel({
               Continue to sign in
             </button>
           ) : (
-            <form onSubmit={submit}>
+            <form onSubmit={submit} hidden={!intent && mode === "forgot"}>
               {!intent && mode === "signup" && (
                 <>
                   <div className="form-grid">
@@ -341,7 +347,7 @@ export function AuthPanel({
                       ? "Verify my email"
                       : "Reset password"
                     : mode === "login"
-                      ? "Open my workspace"
+                      ? "Sign in with password"
                       : mode === "signup"
                         ? "Create account"
                         : "Request reset link"}
@@ -358,10 +364,12 @@ export function AuthPanel({
               )}
             </form>
           )}
-          {!intent && mode === "login" && (
+          {!intent && (mode === "login" || mode === "forgot") && (
             <PasskeyLogin api={api} onComplete={onComplete} />
           )}
-          {!intent && mode === "forgot" && <RecoveryForm api={api} />}
+          {!intent && (mode === "forgot" || mode === "login") && (
+            <RecoveryForm api={api} />
+          )}
           <p className="security-note">
             <ShieldCheck size={16} />
             Private by design. Sending stays under your control.
@@ -421,13 +429,14 @@ export function VerificationGate({
           <AccountSettings account={account} api={api} refresh={refresh} />
         )}
         <p>
-          Welcome, {account.first_name}. Confirm access to {account.email}{" "}
-          before using your private workspace.
+          Welcome, {account.first_name}. Your dashboard, profile, professors and
+          private documents are available. Mailbox actions require verified
+          ownership of {account.email}.
         </p>
         <p className="helper">
           {ready
             ? "Check your inbox and spam folder. Links expire after 24 hours."
-            : "Transactional email delivery has not been configured by the operator. Your account is pending; workspace access is protected until verification becomes available."}
+            : "Email verification delivery is unavailable. Your private workspace remains accessible; Gmail connections, sending and campaign approvals remain restricted."}
         </p>
         <Notice text={error} error />
         <Notice text={message} />
@@ -447,7 +456,9 @@ export function VerificationGate({
             }
           }}
         >
-          Resend verification email
+          {ready
+            ? "Resend verification email"
+            : "Verification email unavailable"}
         </button>
         <button className="secondary" disabled={busy} onClick={() => refresh()}>
           Check verification status
@@ -513,18 +524,11 @@ export function AccountSettings({
         </span>
       </p>
       {!account.email_verified_at && (
-        <button
-          className="secondary"
-          disabled={busy}
-          onClick={() =>
-            run(async () => {
-              const r = await api("/auth/resend-verification", "POST");
-              setMessage(r.message);
-            }, "If delivery is configured, a verification email has been requested.")
-          }
-        >
-          Request verification email
-        </button>
+        <p className="helper">
+          Email Not Verified. Verification email delivery is currently
+          unavailable. Your private workspace is available; sensitive mailbox
+          actions remain restricted under the existing account policy.
+        </p>
       )}
       <form
         key={account.display_name}

@@ -184,6 +184,12 @@ export async function accountPublic(
       .bind(input.email)
       .first<{ id: string; email: string }>();
     if (user) await sendAccountLink(env, user, "reset");
+    if (!mailReady(env))
+      return Response.json({
+        ok: true,
+        message:
+          "Email recovery is unavailable. Sign in with a registered passkey or recover with a saved recovery code.",
+      });
     return ok();
   }
   const input = z
@@ -280,6 +286,13 @@ export async function accountPrivate(
       .bind(user)
       .first<any>();
     await limits(req, env, "verify", row.email);
+    if (!mailReady(env))
+      return Response.json({
+        ok: false,
+        available: false,
+        message:
+          "Verification email delivery is currently unavailable. Your private workspace remains accessible; sensitive mailbox actions require verified ownership.",
+      });
     if (!row.email_verified_at) await sendAccountLink(env, row, "verify");
     return ok();
   }

@@ -229,7 +229,7 @@ export function RecoveryForm({ api }: { api: Api }) {
   }
   return (
     <details>
-      <summary>Recover with a saved code or passkey</summary>
+      <summary>Recover with saved recovery code</summary>
       <p>
         Losing your password, passkeys and all recovery codes may prevent
         account recovery.
