@@ -10,7 +10,13 @@ See [CAMPAIGN-AUTOMATION-RELEASE.md](docs/CAMPAIGN-AUTOMATION-RELEASE.md) for th
 
 The current owner has authorized restricted live activation for `raza1206896@gmail.com` and `muslim1206896@gmail.com`, with no email sent before approval of its exact content in the app. See [LIVE-GMAIL-ACTIVATION.md](docs/LIVE-GMAIL-ACTIVATION.md) for the current release and final steps. Normal production disables mock dispatch and simulation controls. Historical mock receipts never become real sends. Professor outreach requires the separate owner-only activation button after successful controlled deliveries and a detected reply. Preserve existing Groq configuration, Gmail credentials and production data. Earlier release reports below record their historical disabled-live state and do not override this release.
 
-## Transactional account email
+## Current simplified campaign workflow
+
+See [SIMPLIFIED-CAMPAIGN-RELEASE.md](docs/SIMPLIFIED-CAMPAIGN-RELEASE.md) for the current Excel wizard, safe deleted-address reimport, one-time atomic approval and deployment verification. Transactional authentication email is disabled; no Mailjet setup is required. Password login, registered passkeys and saved recovery codes remain available. Unverified users retain private workspace access while sensitive mailbox actions remain verification-gated under the existing policy.
+
+## Historical transactional account email
+
+The provider integrations below are retained for compatibility and are inactive in production.
 
 See [MAILJET-ACCOUNT-EMAIL.md](docs/MAILJET-ACCOUNT-EMAIL.md) for the Mailjet Free integration, controlled delivery certification and current activation result. The earlier [Brevo runbook](docs/TRANSACTIONAL-EMAIL-RELEASE.md) remains historical; Mailjet uses the existing secure verification/recovery flows and installed Cloudflare secrets. Gmail outreach configuration remains separate and unchanged.
 

@@ -16,4 +16,12 @@ Browser regression source: scripts/campaign-browser.cjs. Run from repository roo
 
 Remaining policy limitation: unverified accounts cannot connect Gmail or approve/send campaigns while verification delivery is unavailable. This release preserves that explicitly requested policy; passkeys and recovery codes recover account access without granting email verification. No provider was purchased or new infrastructure created.
 
-Deployment IDs and preservation verification will be recorded after release.
+Production application release:
+
+- Application commit: da9ed585e5f1ca582a5f50f9b554babc233d84c8, pushed to the existing private repository. GitHub CI run 40511499471 completed successfully.
+- Worker version: 63552335-901c-40fc-8944-7b7e7a701963. Exact deployed bundle SHA256: fd7ccbe885a85b80e7ae8ee910670feed2f02308e136996f5b11f3e59e691a4d.
+- Vercel application deployment: dpl_Ng7AJ8Jf2JVAkW1gd21JfP8spJoz, READY, correct application commit and canonical alias confirmed. Subsequent documentation commits may create another identical application deployment.
+- Canonical domain: https://ms-professor-agent-malang43.vercel.app/.
+- Existing D1 migration 0008 applied after an ignored private backup. Protected-data checks passed; complete encrypted Gmail connection rows exactly matched the pre-migration backup. Existing approvals, authorized follow-ups, messages, receipts, account verification/passwords, documents, professors, recipient suppressions, passkeys and recovery hashes were preserved. No new deliveries or production campaign approvals were created.
+- Original Turnstile site key and server enforcement confirmed through both direct Worker and canonical proxy. Public signup rejected missing and invalid tokens. Genuine-browser acceptance was established by the preceding release and its existing widget was not replaced.
+- XLSX matches exactly; CSV matches after Windows/Linux line-ending normalization. Production frontend contains the complete campaign, preparation and recovery controls; no-store, CSP, unauthenticated-state denial and foreign-origin denial checks passed.
