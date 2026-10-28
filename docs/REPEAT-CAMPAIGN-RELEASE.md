@@ -28,4 +28,12 @@ That approval persists the full exact sequence. No later manual preparation or a
 
 ## Production
 
-Migration: `0010_campaign_import_identity.sql`. Worker, Vercel and GitHub deployment identifiers are recorded after publishing. Existing production variables, secrets, D1/KV resources, OAuth, Gmail settings, Turnstile, passkeys, recovery codes, Groq, account and document data remain unchanged. No paid service is activated and no historic email is resent.
+Migration `0010_campaign_import_identity.sql` applied successfully to existing production D1. The two existing deletion-only restrictions were removed; production suppression counts are now empty. No new import was created or approved in production during verification.
+
+- GitHub application commit: `9de18ba` on `main` in the existing private repository.
+- Worker version: `e8db29c0-005f-4aba-aa26-1ecb737eaf8e`.
+- Deployed Worker bundle SHA256: `f9ba0f8f3312e3653b80098b025f674c3fd2e0766388455ce3f0bc85f57c30ba`, matched byte-for-byte against the tested release bundle.
+- Vercel deployment: `dpl_GW6f3aHEywvxTnbR3jVVkZRFnRfC`, READY and aliased to `https://ms-professor-agent-malang43.vercel.app`.
+- Canonical live API health: HTTP 200, Gmail ready, live sending enabled, KV storage. Unauthenticated state access and cross-origin requests remain blocked. Live XLSX/CSV downloads match local release bytes.
+- Automatic cron remains registered every minute; post-release start/completion timestamps advance with no recorded failure. No manual scheduler run or real email was used for verification.
+- Production variables and binding metadata exactly match the pre-release baseline. Protected account/document/connection hashes and immutable message authorizations match. Existing Gmail, OAuth, Turnstile, passkey/recovery, Groq, account and document settings were not reconfigured. No paid service was activated and no historic email was resent.
