@@ -400,7 +400,7 @@ export async function accessToken(
     .first();
   if (!claimed) throw new ProviderError("retry");
   try {
-    const refreshed = await providerRequest(
+    const refreshed = await oauthTokenRequest(
       oauthConfig(connection.provider).token,
       {
         method: "POST",
@@ -413,9 +413,10 @@ export async function accessToken(
         }),
       },
       network,
+      "refresh",
     );
     if (!refreshed.access_token || !Number.isFinite(refreshed.expires_in))
-      throw new ProviderError("reconnect");
+      throw new ProviderError("retry");
     const next = {
       ...tokens,
       ...refreshed,
@@ -435,13 +436,10 @@ export async function accessToken(
         lease,
       )
       .first();
-    if (!saved) throw new ProviderError("reconnect");
+    if (!saved) throw new ProviderError("retry");
     return next.access_token;
   } catch (error) {
-    if (
-      error instanceof ProviderError &&
-      ["reconnect", "rejected"].includes(error.kind)
-    ) {
+    if (error instanceof ProviderError && error.kind === "reconnect") {
       await env.DB.prepare(
         "UPDATE connections SET status='reconnect',tokens=NULL WHERE id=? AND refresh_lease=?",
       )

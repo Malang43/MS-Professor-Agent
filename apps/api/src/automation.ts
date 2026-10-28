@@ -1,6 +1,8 @@
 import { type Env, HttpError, consume, notify, random, hash } from "./runtime";
 import { accessToken, oauthAvailable } from "./oauth";
 import { isLiveOwner, productionEnabled } from "./live-controls";
+import { testRecipients } from "./live-controls";
+import { delayMilliseconds } from "../../../shared/followup-sequence";
 import {
   emailProvider,
   ProviderError,
@@ -174,6 +176,20 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
     .all<any>();
   for (const row of rows.results) {
     const snapshot = JSON.parse(row.snapshot) as Snapshot;
+    const sequence = await env.DB.prepare(
+      "SELECT * FROM followup_steps WHERE child_id=?",
+    )
+      .bind(row.message_id)
+      .first<any>();
+    const replyParent = sequence?.root_id || row.parent_id;
+    if (
+      sequence &&
+      row.state !== "uncertain" &&
+      (sequence.cancel_reason ||
+        (!testRecipients(env).includes(snapshot.recipient.toLowerCase()) &&
+          (sequence.step > 1 || delayMilliseconds(sequence) < 3 * 86400000)))
+    )
+      continue;
     if (
       row.state !== "uncertain" &&
       !(await allowedRecipient(env, snapshot.recipient, row.user_id))
@@ -221,20 +237,20 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
       }
       continue;
     }
-    if (row.parent_id) {
+    if (row.parent_id && !sequence) {
       // A queued child may wait through quota backoff. Recheck its parent thread
       // at submission time; a failed/partial read must invalidate old evidence.
       const checkedAfter = Date.now();
       await env.DB.prepare(
         "UPDATE transports SET sync_checked_at=0 WHERE message_id=?",
       )
-        .bind(row.parent_id)
+        .bind(replyParent)
         .run();
-      await syncReplies(env, network, row.user_id, row.parent_id);
+      await syncReplies(env, network, row.user_id, replyParent);
       const parent = await env.DB.prepare(
         "SELECT m.status,t.sync_checked_at,t.sync_cursor FROM messages m JOIN transports t ON t.message_id=m.id WHERE m.id=? AND m.user_id=?",
       )
-        .bind(row.parent_id, row.user_id)
+        .bind(replyParent, row.user_id)
         .first<any>();
       if (
         !parent ||
@@ -300,18 +316,38 @@ export async function runLiveJobs(env: Env, network: Fetcher = fetch) {
           bytes: await documentBytes(env, doc),
         });
       }
-      if (row.parent_id) {
+      if (sequence) {
+        const prior = await env.DB.prepare(
+          "SELECT t.message_id,t.thread_id FROM transports t JOIN messages m ON m.id=t.message_id WHERE t.state='confirmed' AND t.thread_id IS NOT NULL AND (m.id=? OR m.id IN (SELECT child_id FROM followup_steps WHERE root_id=?)) ORDER BY m.sent_at,t.message_id",
+        )
+          .bind(sequence.root_id, sequence.root_id)
+          .all<any>();
+        const threads = new Set<string>();
+        for (const previous of prior.results) {
+          if (threads.has(previous.thread_id)) continue;
+          threads.add(previous.thread_id);
+          if (
+            !(await syncReplies(env, network, row.user_id, previous.message_id))
+          )
+            throw new HttpError(
+              503,
+              "A complete reply check of every earlier Gmail thread is required before sending.",
+            );
+        }
+        if (!threads.size)
+          throw new HttpError(503, "Previous Gmail thread is unavailable.");
+      } else if (row.parent_id) {
         const checkedAfter = Date.now();
         await env.DB.prepare(
           "UPDATE transports SET sync_checked_at=0 WHERE message_id=?",
         )
-          .bind(row.parent_id)
+          .bind(replyParent)
           .run();
-        await syncReplies(env, network, row.user_id, row.parent_id);
+        await syncReplies(env, network, row.user_id, replyParent);
         const parent = await env.DB.prepare(
           "SELECT m.status,t.sync_checked_at,t.sync_cursor FROM messages m JOIN transports t ON t.message_id=m.id WHERE m.id=? AND m.user_id=?",
         )
-          .bind(row.parent_id, row.user_id)
+          .bind(replyParent, row.user_id)
           .first<any>();
         if (
           !parent ||
@@ -446,7 +482,8 @@ export async function syncReplies(
   user?: string,
   messageId?: string,
 ) {
-  if (env.OAUTH_ENABLED !== "true" || !env.TOKEN_ENCRYPTION_KEY) return;
+  if (env.OAUTH_ENABLED !== "true" || !env.TOKEN_ENCRYPTION_KEY) return false;
+  let complete = false;
   const now = Date.now();
   const rows = await env.DB.prepare(
     `SELECT t.*,m.sent_at,c.provider,c.status AS account_status,c.scopes,c.tokens,c.expires_at,c.refresh_until,c.refresh_lease FROM transports t JOIN messages m ON m.id=t.message_id JOIN connections c ON c.id=t.connection_id WHERE t.state='confirmed' AND t.thread_id IS NOT NULL AND (t.next_sync<=? OR t.message_id=?) AND c.status='connected' AND m.sent_at>? AND (? IS NULL OR t.user_id=?) AND (? IS NULL OR t.message_id=?) ORDER BY t.next_sync LIMIT ?`,
@@ -454,7 +491,9 @@ export async function syncReplies(
     .bind(
       now,
       messageId || null,
-      new Date(now - 31 * 86400000).toISOString(),
+      messageId
+        ? "1970-01-01T00:00:00.000Z"
+        : new Date(now - 31 * 86400000).toISOString(),
       user || null,
       user || null,
       messageId || null,
@@ -482,13 +521,16 @@ export async function syncReplies(
       );
       const snapshot = JSON.parse(row.snapshot) as Snapshot;
       const known = new Set(
-        (
-          await env.DB.prepare(
-            "SELECT provider_id FROM mailbox_events WHERE connection_id=? AND message_id=? ORDER BY rowid DESC LIMIT 200",
-          )
-            .bind(row.connection_id, row.message_id)
-            .all<any>()
-        ).results.map((event) => event.provider_id),
+        (result.events.length
+          ? (
+              await env.DB.prepare(
+                "SELECT provider_id FROM mailbox_events WHERE connection_id=? AND message_id=? ORDER BY rowid DESC LIMIT 200",
+              )
+                .bind(row.connection_id, row.message_id)
+                .all<any>()
+            ).results
+          : []
+        ).map((event) => event.provider_id),
       );
       let processed = 0,
         partial = false;
@@ -557,15 +599,22 @@ export async function syncReplies(
         ]);
       }
       await env.DB.prepare(
-        "UPDATE transports SET sync_cursor=?,sync_checked_at=? WHERE message_id=?",
+        "UPDATE transports SET sync_cursor=?,sync_checked_at=?,sync_error=CASE WHEN ?=1 THEN 'Incomplete mailbox check; sending postponed' ELSE NULL END WHERE message_id=?",
       )
         .bind(
           partial ? row.sync_cursor : result.cursor,
           partial || result.cursor ? 0 : Date.now(),
+          +(partial || !!result.cursor),
           row.message_id,
         )
         .run();
+      complete = !partial && !result.cursor && processed === 0;
     } catch (error) {
+      await env.DB.prepare(
+        "UPDATE transports SET sync_checked_at=0,sync_error='Reply check failed; sending postponed until a complete check succeeds' WHERE message_id=?",
+      )
+        .bind(row.message_id)
+        .run();
       if (error instanceof ProviderError && error.kind === "reconnect") {
         await env.DB.prepare(
           "UPDATE connections SET status='reconnect',tokens=NULL WHERE id=?",
@@ -582,16 +631,38 @@ export async function syncReplies(
       }
     }
   }
+  return complete;
 }
-export async function queueFollowups(env: Env) {
+export async function queueFollowups(env: Env, network: Fetcher = fetch) {
   if (!liveEnabled(env)) return;
   const rows = await env.DB.prepare(
-    `SELECT a.*,m.user_id,m.professor_id,m.timezone,m.sent_at,t.connection_id,t.thread_id,t.snapshot,c.status AS account_status,c.scopes FROM automation a JOIN messages m ON m.id=a.message_id JOIN transports t ON t.message_id=m.id JOIN connections c ON c.id=t.connection_id JOIN profiles p ON p.user_id=m.user_id WHERE a.generated=0 AND NOT EXISTS(SELECT 1 FROM professors pr WHERE pr.id=m.professor_id AND pr.deleted_at IS NOT NULL) AND m.live_ready=1 AND m.parent_id IS NULL AND m.status='sent' AND p.paused=0 AND p.stopped=0 AND c.status='connected' AND t.sync_checked_at>? AND t.sync_cursor IS NULL AND COALESCE(a.due_at,CAST((julianday(m.sent_at)-2440587.5)*86400000 AS INTEGER)+a.days*86400000)<=? LIMIT 1`,
+    `SELECT a.*,m.user_id,m.professor_id,m.timezone,m.sent_at,t.connection_id,t.thread_id,t.snapshot,t.sync_checked_at,t.sync_cursor,c.status AS account_status,c.scopes FROM automation a JOIN messages m ON m.id=a.message_id JOIN transports t ON t.message_id=m.id JOIN connections c ON c.id=t.connection_id JOIN profiles p ON p.user_id=m.user_id WHERE a.generated=0 AND NOT EXISTS(SELECT 1 FROM professors pr WHERE pr.id=m.professor_id AND pr.deleted_at IS NOT NULL) AND m.live_ready=1 AND m.parent_id IS NULL AND m.status='sent' AND p.paused=0 AND p.stopped=0 AND c.status='connected' AND COALESCE(a.due_at,CAST((julianday(m.sent_at)-2440587.5)*86400000 AS INTEGER)+a.days*86400000)<=? ORDER BY COALESCE(a.due_at,0),a.message_id LIMIT 1`,
   )
-    .bind(Date.now() - 60000, Date.now())
+    .bind(Date.now())
     .all<any>();
   for (const row of rows.results) {
     const snapshot = JSON.parse(row.snapshot) as Snapshot;
+    if (row.sync_checked_at <= Date.now() - 60000 || row.sync_cursor) {
+      const checkedAfter = Date.now();
+      await env.DB.prepare(
+        "UPDATE transports SET sync_checked_at=0 WHERE message_id=?",
+      )
+        .bind(row.message_id)
+        .run();
+      await syncReplies(env, network, row.user_id, row.message_id);
+      const parent = await env.DB.prepare(
+        "SELECT m.status,t.sync_checked_at,t.sync_cursor FROM messages m JOIN transports t ON t.message_id=m.id WHERE m.id=?",
+      )
+        .bind(row.message_id)
+        .first<any>();
+      if (
+        !parent ||
+        parent.status !== "sent" ||
+        parent.sync_cursor ||
+        parent.sync_checked_at < checkedAfter
+      )
+        continue;
+    }
     if (
       !(await allowedRecipient(env, snapshot.recipient, row.user_id)) ||
       !/gmail.readonly|Mail.Read/.test(row.scopes)

@@ -2,6 +2,7 @@ import { type Env, HttpError } from "./runtime";
 import { z } from "zod";
 import { liveEnabled, allowedRecipient } from "./automation";
 import { syncReplies } from "./automation";
+import { testRecipients } from "./live-controls";
 export async function approveFollowup(
   env: Env,
   user: string,
@@ -38,6 +39,11 @@ export async function approveFollowup(
       "Only an unanswered confirmed email with reply access can receive a follow-up approval.",
     );
   const proposal = JSON.parse(row.followup_proposal || "null");
+  if (proposal?.steps)
+    throw new HttpError(
+      409,
+      "Multistep proposals require complete campaign approval before the initial message. Review a new draft campaign.",
+    );
   if (
     !proposal ||
     proposal.days !== input.days ||
@@ -49,6 +55,14 @@ export async function approveFollowup(
       "The proposal changed. Review its exact content again.",
     );
   const snapshot = JSON.parse(row.snapshot);
+  if (
+    !testRecipients(env).includes(snapshot.recipient.toLowerCase()) &&
+    input.days < 3
+  )
+    throw new HttpError(
+      403,
+      "New external outreach follow-ups require at least 3 days.",
+    );
   if (!(await allowedRecipient(env, snapshot.recipient, user)))
     throw new HttpError(403, "Recipient is outside the current sending mode.");
   await syncReplies(env, fetch, user, id);

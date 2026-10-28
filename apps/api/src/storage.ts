@@ -298,7 +298,7 @@ export async function deleteDocument(env: Env, user: string, id: string) {
   if (!row) throw new HttpError(404, "Not found");
   // A single conditional UPDATE prevents deleting a file referenced by queued mail.
   const marked = await env.DB.prepare(
-    `UPDATE documents SET storage_state='deleting',purge_after=COALESCE(purge_after,?),cleanup_after=? WHERE id=? AND user_id=? AND NOT EXISTS(SELECT 1 FROM message_attachments a JOIN messages m ON m.id=a.message_id LEFT JOIN automation f ON f.message_id=m.id WHERE a.document_id=? AND (m.status IN ('draft','pending') OR (m.status='sent' AND f.generated=0))) RETURNING id`,
+    `UPDATE documents SET storage_state='deleting',purge_after=COALESCE(purge_after,?),cleanup_after=? WHERE id=? AND user_id=? AND NOT EXISTS(SELECT 1 FROM message_attachments a JOIN messages m ON m.id=a.message_id LEFT JOIN automation f ON f.message_id=m.id WHERE a.document_id=? AND (m.status IN ('draft','pending') OR (m.status='sent' AND (f.generated=0 OR EXISTS(SELECT 1 FROM followup_steps step LEFT JOIN transports child ON child.message_id=step.child_id WHERE step.root_id=m.id AND step.cancel_reason IS NULL AND (child.state IS NULL OR child.state!='confirmed')))))) RETURNING id`,
   )
     .bind(Date.now() + 120000, Date.now() + 120000, id, user, id)
     .first();

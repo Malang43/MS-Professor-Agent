@@ -1,6 +1,7 @@
 import { reimportDeleted } from "./reimport";
 import { workspaceAccess, limitedWorkspaceState } from "./workspace-access";
 import { approveFollowup } from "./followup-approval";
+import { queueSequence } from "./followup-sequence";
 import { securityPublic, securityPrivate } from "./security";
 import { z } from "zod";
 import { recordAction } from "./records";
@@ -14,6 +15,7 @@ import {
   testRecipients,
 } from "./live-controls";
 import { spreadsheetDraft } from "../../../shared/spreadsheet";
+import { validateSequence } from "../../../shared/followup-sequence";
 import {
   accountPublic,
   accountPrivate,
@@ -83,6 +85,8 @@ const messageSchema = z.object({
   followup: z
     .object({
       days: z.number().int().min(1).max(30),
+      delay_value: z.number().int().min(1).max(43200).optional(),
+      delay_unit: z.enum(["minutes", "hours", "days"]).optional(),
       subject: z
         .string()
         .min(1)
@@ -290,12 +294,34 @@ async function route(req: Request, env: Env): Promise<Response> {
     ]);
     return json({ ok: true });
   }
+  const cancelStep = path.match(
+    /^\/api\/messages\/([^/]+)\/sequence\/([1-5])\/cancel$/,
+  );
+  if (cancelStep && method === "POST") {
+    await owned(env, "messages", cancelStep[1], user);
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE followup_steps SET cancel_reason=COALESCE(cancel_reason,'manual') WHERE root_id=? AND step>=?",
+      ).bind(cancelStep[1], Number(cancelStep[2])),
+      env.DB.prepare(
+        "UPDATE messages SET status='cancelled' WHERE status IN ('draft','pending') AND id IN (SELECT child_id FROM followup_steps WHERE root_id=? AND step>=?)",
+      ).bind(cancelStep[1], Number(cancelStep[2])),
+      audit(env, user, "sequence.cancelled", cancelStep[1]),
+    ]);
+    return json({ ok: true });
+  }
   const cancelAutomation = path.match(
     /^\/api\/messages\/([^/]+)\/automation\/cancel$/,
   );
   if (cancelAutomation && method === "POST") {
     await owned(env, "messages", cancelAutomation[1], user);
     await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE followup_steps SET cancel_reason=COALESCE(cancel_reason,'manual') WHERE root_id=?",
+      ).bind(cancelAutomation[1]),
+      env.DB.prepare(
+        "UPDATE messages SET status='cancelled' WHERE user_id=? AND status IN ('draft','pending') AND id IN (SELECT child_id FROM followup_steps WHERE root_id=?)",
+      ).bind(user, cancelAutomation[1]),
       env.DB.prepare(
         "UPDATE automation SET generated=1,cancel_reason=COALESCE(cancel_reason,'manual') WHERE message_id=?",
       ).bind(cancelAutomation[1]),
@@ -397,6 +423,16 @@ async function route(req: Request, env: Env): Promise<Response> {
           .bind(user)
           .all()
       ).results,
+      scheduler: await env.DB.prepare(
+        "SELECT * FROM scheduler_health WHERE id=1",
+      ).first(),
+      followup_steps: (
+        await env.DB.prepare(
+          "SELECT f.*,m.status root_status,c.status account_status,t.sync_checked_at,last.status sending_status,ct.state transport_state,ct.provider_id,ct.next_at,last.error FROM followup_steps f JOIN messages m ON m.id=f.root_id JOIN transports t ON t.message_id=m.id JOIN connections c ON c.id=t.connection_id LEFT JOIN messages last ON last.id=f.child_id LEFT JOIN transports ct ON ct.message_id=f.child_id WHERE m.user_id=? ORDER BY f.root_id,f.step",
+        )
+          .bind(user)
+          .all()
+      ).results,
       automation: (
         await env.DB.prepare(
           "SELECT a.*,m.sent_at,m.status initial_status,m.professor_id,child.id followup_id,child.status child_status,ct.state child_transport_state,ct.provider_id followup_provider_id,t.provider_id initial_provider_id,s.reason suppression_reason FROM automation a JOIN messages m ON m.id=a.message_id LEFT JOIN transports t ON t.message_id=m.id LEFT JOIN messages child ON child.parent_id=m.id LEFT JOIN transports ct ON ct.message_id=child.id LEFT JOIN suppressions s ON s.user_id=m.user_id AND s.address=lower(COALESCE(json_extract(t.snapshot,'$.recipient'),m.approved_recipient)) WHERE m.user_id=?",
@@ -406,7 +442,7 @@ async function route(req: Request, env: Env): Promise<Response> {
       ).results,
       transports: (
         await env.DB.prepare(
-          "SELECT message_id,connection_id,state,provider_id,thread_id,attempts,next_at FROM transports WHERE user_id=?",
+          "SELECT message_id,connection_id,state,provider_id,thread_id,attempts,next_at,sync_checked_at,sync_error FROM transports WHERE user_id=?",
         )
           .bind(user)
           .all()
@@ -636,6 +672,17 @@ async function route(req: Request, env: Env): Promise<Response> {
       .min(1)
       .max(25)
       .parse(await req.json());
+    const recipientRows = new Map<string, string>();
+    for (const row of input) {
+      const key = row.email?.trim().toLowerCase() || "";
+      const serialized = JSON.stringify(row);
+      if (recipientRows.has(key) && recipientRows.get(key) !== serialized)
+        throw new HttpError(
+          400,
+          "Conflicting duplicate campaign recipients are not allowed.",
+        );
+      recipientRows.set(key, serialized);
+    }
     const active = (
       await env.DB.prepare(
         "SELECT id,email FROM professors WHERE user_id=? AND deleted_at IS NULL",
@@ -724,6 +771,19 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
   if (path === "/api/messages" && method === "POST") {
     const m = messageSchema.parse(await req.json());
+    if (
+      m.followup?.delay_unit &&
+      (!m.followup.delay_value ||
+        m.followup.delay_value *
+          { minutes: 60000, hours: 3600000, days: 86400000 }[
+            m.followup.delay_unit
+          ] >
+          30 * 86400000)
+    )
+      throw new HttpError(
+        400,
+        "Flexible follow-up delays must be positive and no longer than 30 days.",
+      );
     if (env.MOCK_DELIVERY_ENABLED === "false" && m.mode === "auto")
       throw new HttpError(
         400,
@@ -741,6 +801,37 @@ async function route(req: Request, env: Env): Promise<Response> {
     await consume(env, "messages:global", 500);
     const messageId = id(),
       queued = canQueue(m);
+    const modernFollowup = m.followup?.delay_unit
+      ? {
+          days: 1,
+          subject: m.followup.subject,
+          body: m.followup.body,
+          steps: validateSequence([
+            {
+              subject: m.followup.subject,
+              body: m.followup.body,
+              delay_value: m.followup.delay_value,
+              delay_unit: m.followup.delay_unit,
+              relative_to: "original",
+            },
+          ]),
+        }
+      : null;
+    if (modernFollowup && queued)
+      throw new HttpError(
+        400,
+        "Save a draft and review the entire flexible sequence before approving.",
+      );
+    if (
+      m.followup &&
+      !modernFollowup &&
+      !testRecipients(env).includes(String(recipient.email).toLowerCase()) &&
+      m.followup.days < 3
+    )
+      throw new HttpError(
+        403,
+        "New external outreach follow-ups require at least 3 days.",
+      );
     const snapshot = m.sending_account_id
       ? await transportSnapshot(
           env,
@@ -799,7 +890,14 @@ async function route(req: Request, env: Env): Promise<Response> {
             ),
           ]
         : []),
-      ...(m.followup
+      ...(modernFollowup
+        ? [
+            env.DB.prepare(
+              "UPDATE messages SET followup_proposal=? WHERE id=?",
+            ).bind(JSON.stringify(modernFollowup), messageId),
+          ]
+        : []),
+      ...(m.followup && !modernFollowup
         ? [
             env.DB.prepare(
               "INSERT INTO automation(message_id,days,subject,body) VALUES(?,?,?,?)",
@@ -1083,25 +1181,43 @@ export default {
   },
   async scheduled(_event: ScheduledEvent, env: Env) {
     if (!env.DB || !env.DOCUMENTS_KV) return;
-    // Mock scheduling remains minute-based. Rotate heavier work to cap each tick.
-    await runJobs(env);
-    const phase = Math.floor(Date.now() / 60000) % 3;
-    if (phase === 0) {
-      await syncReplies(env);
-      await queueFollowups(env);
-    } else if (phase === 1) await runLiveJobs(env);
-    else {
-      await checkGmail(env);
-      await cleanDocuments(env);
-      await cleanDeletedAccounts(env);
+    await env.DB.prepare(
+      "INSERT INTO scheduler_health(id,started_at,failure) VALUES(1,?,NULL) ON CONFLICT(id) DO UPDATE SET started_at=excluded.started_at,failure=NULL",
+    )
+      .bind(Date.now())
+      .run();
+    try {
+      // Mock scheduling remains minute-based. Rotate heavier work to cap each tick.
+      await runJobs(env);
+      const phase = Math.floor(Date.now() / 60000) % 3;
+      if (phase === 0) {
+        await syncReplies(env);
+        await queueFollowups(env);
+        await queueSequence(env);
+      } else if (phase === 1) await runLiveJobs(env);
+      else {
+        await checkGmail(env);
+        await cleanDocuments(env);
+        await cleanDeletedAccounts(env);
+        await env.DB.prepare(
+          "DELETE FROM oauth_states WHERE state_hash IN (SELECT state_hash FROM oauth_states WHERE expires_at<? LIMIT 20)",
+        )
+          .bind(Date.now())
+          .run();
+        await env.DB.prepare(
+          `DELETE FROM usage_counters WHERE rowid IN (SELECT rowid FROM usage_counters WHERE period<date('now','-2 days') LIMIT 20)`,
+        ).run();
+      }
       await env.DB.prepare(
-        "DELETE FROM oauth_states WHERE state_hash IN (SELECT state_hash FROM oauth_states WHERE expires_at<? LIMIT 20)",
+        "UPDATE scheduler_health SET completed_at=? WHERE id=1",
       )
         .bind(Date.now())
         .run();
+    } catch (error) {
       await env.DB.prepare(
-        `DELETE FROM usage_counters WHERE rowid IN (SELECT rowid FROM usage_counters WHERE period<date('now','-2 days') LIMIT 20)`,
+        "UPDATE scheduler_health SET failure='Scheduled execution failed; inspect Worker logs' WHERE id=1",
       ).run();
+      throw error;
     }
   },
 };

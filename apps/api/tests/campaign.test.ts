@@ -9,10 +9,296 @@ import {
 } from "../src/automation";
 import { runJobs } from "../src/index";
 import { checkGmail } from "../src/live-controls";
+import { queueSequence } from "../src/followup-sequence";
 let h: ReturnType<typeof harness>,
   owner: Awaited<ReturnType<ReturnType<typeof harness>["user"]>>,
   connection: string;
 const recipient = "controlled@example.com";
+const sequenceRow = (steps: unknown[]) => ({
+  ...row,
+  follow_up_days: "",
+  follow_up_subject: "",
+  follow_up_body: "",
+  follow_up_sequence: JSON.stringify(steps),
+});
+const sequenceStep = (
+  delay_value: number,
+  delay_unit = "minutes",
+  relative_to = "previous",
+) => ({
+  subject: row.subject,
+  body: "Exact conditional sequence content",
+  delay_value,
+  delay_unit,
+  relative_to,
+});
+
+describe("precise conditional sequences", () => {
+  it("checks replies in earlier distinct follow-up threads before submitting the next step", async () => {
+    const [draft] = await importRows([
+      sequenceRow([
+        sequenceStep(5),
+        { ...sequenceStep(5), subject: "A different subject" },
+      ]),
+    ]);
+    expect((await approve([draft.id], true)).status).toBe(200);
+    let sends = 0;
+    let replied = false;
+    const network = vi.fn(async (url: string) => {
+      if (url.includes("/messages/send")) {
+        sends++;
+        return Response.json({
+          id: "accepted-" + sends,
+          threadId: "thread-" + sends,
+        });
+      }
+      if (url.includes("/threads/"))
+        return Response.json({
+          messages:
+            replied && url.includes("/threads/thread-2?")
+              ? [
+                  {
+                    id: "reply-child",
+                    internalDate: String(Date.now() - 1000),
+                    snippet: "Thank you",
+                    payload: { headers: [{ name: "From", value: recipient }] },
+                  },
+                ]
+              : [],
+        });
+      throw new Error("Unexpected synthetic request");
+    });
+    await runLiveJobs(h.env, network as any);
+    advance(301000);
+    await queueSequence(h.env, network as any);
+    await runLiveJobs(h.env, network as any);
+    expect(sends).toBe(2);
+    advance(301000);
+    replied = true;
+    await queueSequence(h.env, network as any);
+    await runLiveJobs(h.env, network as any);
+    expect(sends).toBe(2);
+    expect(
+      h.db
+        .prepare(
+          "SELECT count(*) n FROM followup_steps WHERE cancel_reason='reply'",
+        )
+        .get()!.n,
+    ).toBe(2);
+  });
+
+  it("bounds a fifth-step send across five distinct threads within the Free-plan subrequest allowance", async () => {
+    const [draft] = await importRows([
+      sequenceRow(
+        Array.from({ length: 5 }, (_, index) => ({
+          ...sequenceStep(5),
+          subject: "Distinct subject " + index,
+        })),
+      ),
+    ]);
+    expect((await approve([draft.id], true)).status).toBe(200);
+    let sends = 0,
+      reads = 0;
+    const network = vi.fn(async (url: string) => {
+      if (url.includes("/messages/send")) {
+        sends++;
+        return Response.json({
+          id: "accepted-" + sends,
+          threadId: "thread-" + sends,
+        });
+      }
+      if (url.includes("/threads/")) {
+        reads++;
+        return Response.json({ messages: [] });
+      }
+      throw new Error("Unexpected synthetic request");
+    });
+    await runLiveJobs(h.env, network as any);
+    for (let index = 0; index < 4; index++) {
+      advance(301000);
+      await queueSequence(h.env, network as any);
+      await runLiveJobs(h.env, network as any);
+    }
+    advance(301000);
+    await queueSequence(h.env, network as any);
+    const prepare = h.env.DB.prepare.bind(h.env.DB);
+    let queries = 0;
+    h.env.DB.prepare = ((sql: string) => {
+      queries++;
+      return prepare(sql);
+    }) as typeof h.env.DB.prepare;
+    reads = 0;
+    await runLiveJobs(h.env, network as any);
+    expect(sends).toBe(6);
+    expect(reads).toBe(5);
+    expect(queries + reads + 1).toBeLessThanOrEqual(50);
+  });
+  it.each([
+    [5, "minutes", 300000],
+    [10, "minutes", 600000],
+    [1, "hours", 3600000],
+    [3, "days", 259200000],
+  ])(
+    "queues %s %s only after the confirmed due time",
+    async (value, unit, elapsed) => {
+      const [draft] = await importRows([
+        sequenceRow([sequenceStep(Number(value), String(unit), "original")]),
+      ]);
+      expect(
+        h.db.prepare("SELECT count(*) n FROM followup_steps").get()!.n,
+      ).toBe(0);
+      expect((await approve([draft.id], true)).status).toBe(200);
+      const p = provider();
+      await runLiveJobs(h.env, p.network as any);
+      const accepted = Date.parse(
+        String(
+          h.db.prepare("SELECT sent_at FROM messages WHERE id=?").get(draft.id)!
+            .sent_at,
+        ),
+      );
+      advance(Number(elapsed) - 1000);
+      await queueSequence(h.env, p.network as any);
+      expect(
+        h.db.prepare("SELECT queued FROM followup_steps").get()!.queued,
+      ).toBe(0);
+      expect(
+        Number(h.db.prepare("SELECT due_at FROM followup_steps").get()!.due_at),
+      ).toBe(accepted + Number(elapsed));
+      advance(2000);
+      await Promise.all([
+        queueSequence(h.env, p.network as any),
+        queueSequence(h.env, p.network as any),
+      ]);
+      await runLiveJobs(h.env, p.network as any);
+      await queueSequence(h.env, p.network as any);
+      expect(p.submissions()).toBe(2);
+      expect(
+        h.db
+          .prepare(
+            "SELECT count(*) n FROM messages WHERE parent_id IS NOT NULL",
+          )
+          .get()!.n,
+      ).toBe(1);
+    },
+  );
+
+  it("approves and sends five exact steps once, relative to each actual previous send", async () => {
+    const delays = [5, 10, 15, 30, 30];
+    const [draft] = await importRows([
+      sequenceRow(delays.map((delay) => sequenceStep(delay))),
+    ]);
+    const approval = await approve([draft.id], true);
+    expect(approval.status).toBe(200);
+    expect(await approval.json()).toMatchObject({
+      authorized_followups: 5,
+      total_messages: 6,
+    });
+    const p = provider();
+    await runLiveJobs(h.env, p.network as any);
+    for (const [index, delay] of delays.entries()) {
+      advance(delay * 60000 + 1000);
+      await Promise.all([
+        queueSequence(h.env, p.network as any),
+        queueSequence(h.env, p.network as any),
+      ]);
+      await runLiveJobs(h.env, p.network as any);
+      expect(p.submissions()).toBe(index + 2);
+    }
+    await queueSequence(h.env, p.network as any);
+    await runLiveJobs(h.env, p.network as any);
+    expect(p.submissions()).toBe(6);
+    expect(
+      h.db
+        .prepare("SELECT count(*) n FROM transports WHERE state='confirmed'")
+        .get()!.n,
+    ).toBe(6);
+    const snapshots = h.db
+      .prepare("SELECT snapshot FROM transports WHERE message_id!=?")
+      .all(draft.id);
+    expect(
+      snapshots.every(
+        (transport) =>
+          JSON.parse(String(transport.snapshot)).threadId === "gmail-thread",
+      ),
+    ).toBe(true);
+    expect(
+      h.db.prepare("SELECT count(*) n FROM message_authorizations").get()!.n,
+    ).toBe(6);
+  });
+
+  it.each([0, 1, 2, 3, 4])(
+    "cancels all remaining steps when a reply arrives after %s follow-ups",
+    async (sentSteps) => {
+      const [draft] = await importRows([
+        sequenceRow(Array.from({ length: 5 }, () => sequenceStep(5))),
+      ]);
+      expect((await approve([draft.id], true)).status).toBe(200);
+      const p = provider();
+      await runLiveJobs(h.env, p.network as any);
+      for (let index = 0; index < sentSteps; index++) {
+        advance(301000);
+        await queueSequence(h.env, p.network as any);
+        await runLiveJobs(h.env, p.network as any);
+      }
+      advance(301000);
+      await queueSequence(h.env, provider(true).network as any);
+      await runLiveJobs(h.env, p.network as any);
+      expect(p.submissions()).toBe(sentSteps + 1);
+      expect(
+        h.db
+          .prepare(
+            "SELECT count(*) n FROM followup_steps WHERE cancel_reason='reply'",
+          )
+          .get()!.n,
+      ).toBe(5);
+    },
+  );
+
+  it("postpones on failed reply checking and blocks edits to exact authorization", async () => {
+    const [draft] = await importRows([sequenceRow([sequenceStep(5)])]);
+    expect((await approve([draft.id], true)).status).toBe(200);
+    const p = provider();
+    await runLiveJobs(h.env, p.network as any);
+    advance(301000);
+    await queueSequence(h.env, provider(false, true).network as any);
+    expect(
+      h.db.prepare("SELECT queued FROM followup_steps").get()!.queued,
+    ).toBe(0);
+    expect(() =>
+      h.db.prepare("UPDATE followup_steps SET body='changed'").run(),
+    ).toThrow(/immutable/);
+    await queueSequence(h.env, p.network as any);
+    const child = h.db.prepare("SELECT child_id FROM followup_steps").get()!
+      .child_id;
+    await h.request(
+      `/messages/${draft.id}/sequence/1/cancel`,
+      "POST",
+      {},
+      owner.session,
+    );
+    await runLiveJobs(h.env, p.network as any);
+    expect(p.submissions()).toBe(1);
+    expect(
+      h.db.prepare("SELECT status FROM messages WHERE id=?").get(child)!.status,
+    ).toBe("cancelled");
+  });
+
+  it("rejects accelerated external sequences even when production outreach is enabled", async () => {
+    h.db
+      .prepare(
+        "INSERT INTO outreach_settings(user_id,production_enabled) VALUES(?,1)",
+      )
+      .run(owner.id);
+    h.env.LIVE_TEST_RECIPIENTS = "other@example.com";
+    const [draft] = await importRows([
+      sequenceRow([sequenceStep(5), sequenceStep(10)]),
+    ]);
+    expect((await approve([draft.id], true)).status).toBe(403);
+    expect(h.db.prepare("SELECT count(*) n FROM followup_steps").get()!.n).toBe(
+      0,
+    );
+  });
+});
 const row = {
   name: "Campaign professor",
   email: recipient,
@@ -357,6 +643,7 @@ describe("one-time campaign lifecycle", () => {
       Array.from({ length: 25 }, (_, i) => ({
         ...row,
         email: `synthetic-${i}@example.com`,
+        follow_up_days: "3",
       })),
     );
     const prepare = h.env.DB.prepare.bind(h.env.DB);

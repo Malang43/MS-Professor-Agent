@@ -1,4 +1,10 @@
-export type FollowupProposal = { days: number; subject: string; body: string };
+import { validateSequence, type FollowupStep } from "./followup-sequence";
+export type FollowupProposal = {
+  days: number;
+  subject: string;
+  body: string;
+  steps?: FollowupStep[];
+};
 export type SpreadsheetDraft = {
   name: string;
   email: string;
@@ -61,7 +67,12 @@ export function spreadsheetDraft(
   let followup_proposal: FollowupProposal | undefined;
   let followup_issue: string | undefined,
     followup_draft: SpreadsheetDraft["followup_draft"];
-  if (row.followup_days || row.followup_subject || row.followup_body) {
+  if (
+    (row.followup_days || row.followup_subject || row.followup_body) &&
+    !row.follow_up_delay_value &&
+    !row.follow_up_sequence &&
+    !row.follow_up_1_delay_value
+  ) {
     const days = Number(row.followup_days),
       subject = row.followup_subject || "",
       body = row.followup_body || "";
@@ -93,6 +104,75 @@ export function spreadsheetDraft(
         body,
       };
     } else followup_proposal = { days, subject, body };
+  }
+  const numbered = Array.from({ length: 5 }, (_, index) => {
+    const prefix = `follow_up_${index + 1}_`;
+    if (
+      !["subject", "body", "delay_value", "delay_unit", "relative_to"].some(
+        (field) => row[prefix + field],
+      )
+    )
+      return null;
+    return {
+      subject: row[prefix + "subject"],
+      body: row[prefix + "body"],
+      delay_value: Number(row[prefix + "delay_value"]),
+      delay_unit: row[prefix + "delay_unit"],
+      relative_to: row[prefix + "relative_to"],
+    };
+  });
+  let configured: unknown = null;
+  if (row.follow_up_sequence) {
+    if (numbered.some(Boolean))
+      fail("use either follow_up_sequence JSON or numbered step columns.");
+    try {
+      configured = JSON.parse(row.follow_up_sequence);
+    } catch {
+      fail("invalid follow_up_sequence JSON.");
+    }
+  } else if (numbered.some(Boolean)) {
+    const last = numbered.reduce(
+      (last, step, index) => (step ? index : last),
+      -1,
+    );
+    configured = numbered.slice(0, last + 1);
+  } else if (
+    row.follow_up_delay_value ||
+    row.follow_up_delay_unit ||
+    row.follow_up_relative_to
+  ) {
+    configured = [
+      {
+        subject: row.followup_subject,
+        body: row.followup_body,
+        delay_value: Number(row.follow_up_delay_value),
+        delay_unit: row.follow_up_delay_unit,
+        relative_to: row.follow_up_relative_to || "original",
+      },
+    ];
+  }
+  if (configured || row.follow_up_sequence) {
+    if (row.followup_days)
+      fail("legacy day delay conflicts with sequence timing.");
+    if (
+      (row.follow_up_sequence || numbered.some(Boolean)) &&
+      (row.followup_subject || row.followup_body)
+    )
+      fail("legacy follow-up content conflicts with sequence content.");
+    let steps: FollowupStep[];
+    try {
+      steps = validateSequence(configured);
+    } catch (error) {
+      return fail((error as Error).message);
+    }
+    followup_proposal = {
+      days: 1,
+      subject: steps[0].subject,
+      body: steps[0].body,
+      steps,
+    };
+    followup_issue = undefined;
+    followup_draft = undefined;
   }
   // Spreadsheet authorization flags are never accepted.
   return {

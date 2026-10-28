@@ -1,0 +1,182 @@
+const fs = require("node:fs");
+const assert = require("node:assert/strict");
+const { build } = require("esbuild");
+const { Miniflare, convertV4MiniflareOptions } = require(
+  require.resolve("miniflare", {
+    paths: [require.resolve("wrangler/package.json")],
+  }),
+);
+
+async function main() {
+  const entry = `import worker from './apps/api/src/index';
+    import {encrypt} from './apps/api/src/oauth';
+    import {queueSequence} from './apps/api/src/followup-sequence';
+    import {runLiveJobs} from './apps/api/src/automation';
+    export default {async fetch(req,env) {
+      const route=new URL(req.url).pathname;
+      if(route==='/tokens')return Response.json({tokens:await encrypt(env,'runtime-user:gmail:tokens:v1',{access_token:'synthetic',refresh_token:'synthetic',expires_in:3600})});
+      if(route==='/queue')await queueSequence(env);
+      if(route==='/send')await runLiveJobs(env);
+      if(route==='/cron')await worker.scheduled({cron:'* * * * *',scheduledTime:Date.now()},env);
+      return Response.json({ok:true});
+    }};`;
+  const bundled = await build({
+    stdin: { contents: entry, resolveDir: process.cwd() },
+    bundle: true,
+    write: false,
+    format: "esm",
+    platform: "browser",
+  });
+  let submissions = 0;
+  const mf = new Miniflare(
+    convertV4MiniflareOptions({
+      modules: true,
+      script: bundled.outputFiles[0].text,
+      compatibilityDate: "2026-10-01",
+      d1Databases: ["DB"],
+      kvNamespaces: ["DOCUMENTS_KV"],
+      bindings: {
+        APP_ORIGIN: "https://synthetic.invalid",
+        OAUTH_ENABLED: "true",
+        LIVE_EMAIL_ENABLED: "true",
+        MOCK_DELIVERY_ENABLED: "false",
+        LIVE_TEST_RECIPIENTS: "controlled@example.invalid",
+        TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+        GMAIL_CLIENT_ID: "synthetic",
+        GMAIL_CLIENT_SECRET: "synthetic",
+      },
+      outboundService: async (request) => {
+        if (request.url.includes("/messages/send")) {
+          submissions++;
+          const body = await request.json();
+          assert.equal(body.threadId, "runtime-thread");
+          const mime = Buffer.from(body.raw, "base64url").toString();
+          assert.match(
+            mime,
+            /In-Reply-To: <runtime-original@ms-professor-agent.invalid>/,
+          );
+          return Response.json({
+            id: "runtime-followup",
+            threadId: "runtime-thread",
+          });
+        }
+        if (request.url.includes("/threads/"))
+          return Response.json({ messages: [] });
+        if (request.url.endsWith("/profile"))
+          return Response.json({ emailAddress: "sender@example.invalid" });
+        throw new Error("Unexpected outbound request blocked");
+      },
+    }),
+  );
+  try {
+    const db = await mf.getD1Database("DB");
+    for (const file of fs
+      .readdirSync("apps/api/migrations")
+      .filter((file) => file.endsWith(".sql"))
+      .sort()) {
+      const sql = fs
+        .readFileSync("apps/api/migrations/" + file, "utf8")
+        .replace(/--[^\n]*/g, "")
+        .replace(/\r?\n/g, " ");
+      await db.exec(sql);
+    }
+    const tokens = await (
+      await mf.dispatchFetch("http://localhost/tokens")
+    ).json();
+    const now = Date.now();
+    const original = {
+      recipient: "controlled@example.invalid",
+      subject: "Runtime sequence",
+      body: "Synthetic original",
+      attachments: [],
+      key: "runtime-original@ms-professor-agent.invalid",
+    };
+    const step = {
+      subject: original.subject,
+      body: "Exact runtime follow-up",
+      delay_value: 5,
+      delay_unit: "minutes",
+      relative_to: "original",
+    };
+    await db.batch([
+      db.prepare(
+        "INSERT INTO users(id,email,password) VALUES('runtime-user','owner@example.invalid','synthetic')",
+      ),
+      db.prepare("INSERT INTO profiles(user_id) VALUES('runtime-user')"),
+      db.prepare(
+        "INSERT INTO professors(id,user_id,name,email) VALUES('runtime-professor','runtime-user','Synthetic','controlled@example.invalid')",
+      ),
+      db
+        .prepare(
+          "INSERT INTO connections(id,user_id,provider,address,subject,scopes,tokens,expires_at) VALUES('runtime-connection','runtime-user','gmail','sender@example.invalid','runtime-mailbox','gmail.send gmail.readonly',?,?)",
+        )
+        .bind(tokens.tokens, now + 3600000),
+      db
+        .prepare(
+          "INSERT INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone,sent_at,live_ready) VALUES('runtime-root','runtime-user','runtime-professor',?,?,'manual',1,1,'sent',?,'Asia/Karachi',?,1)",
+        )
+        .bind(
+          original.subject,
+          original.body,
+          new Date(now - 600000).toISOString(),
+          new Date(now - 600000).toISOString(),
+        ),
+      db
+        .prepare(
+          "INSERT INTO transports(message_id,user_id,connection_id,snapshot,state,provider_id,thread_id) VALUES('runtime-root','runtime-user','runtime-connection',?,'confirmed','runtime-original','runtime-thread')",
+        )
+        .bind(JSON.stringify(original)),
+      db
+        .prepare(
+          "INSERT INTO message_authorizations(message_id,user_id,campaign_id,snapshot,authorized_at,followup_authorized) VALUES('runtime-root','runtime-user','runtime-campaign',?,?,1)",
+        )
+        .bind(
+          JSON.stringify({ initial: original, followup: { steps: [step] } }),
+          now,
+        ),
+      db
+        .prepare(
+          "INSERT INTO followup_steps(root_id,step,child_id,subject,body,delay_value,delay_unit,relative_to,authorized_at) VALUES('runtime-root',1,'runtime-child',?,?,5,'minutes','original',?)",
+        )
+        .bind(step.subject, step.body, now),
+    ]);
+    for (const route of ["queue", "queue", "send", "send", "cron"]) {
+      const response = await mf.dispatchFetch("http://localhost/" + route);
+      assert.equal(response.status, 200, await response.text());
+    }
+    assert.equal(submissions, 1);
+    assert.equal(
+      (
+        await db
+          .prepare(
+            "SELECT state FROM transports WHERE message_id='runtime-child'",
+          )
+          .first()
+      ).state,
+      "confirmed",
+    );
+    assert.equal(
+      (
+        await db
+          .prepare(
+            "SELECT count(*) n FROM deliveries WHERE message_id='runtime-child'",
+          )
+          .first()
+      ).n,
+      1,
+    );
+    const health = await db
+      .prepare("SELECT * FROM scheduler_health WHERE id=1")
+      .first();
+    assert(health.completed_at && !health.failure);
+    console.log(
+      "PASS native Workers runtime and D1: all migrations, exact step approval, 5-minute due time, Gmail threading, duplicate queue/send prevention and scheduled handler health. All provider traffic intercepted; no real mail.",
+    );
+  } finally {
+    await mf.dispose();
+  }
+}
+main().catch((error) => {
+  console.error(error.stack);
+  process.exitCode = 1;
+});

@@ -101,10 +101,12 @@ export async function oauthTokenRequest(
   url: string,
   init: RequestInit,
   network: Fetcher = fetch,
+  operation: "exchange" | "refresh" = "exchange",
 ): Promise<any> {
   let status = 0;
   let reported = false;
   let failure = "request_setup_exception";
+  let tokenFailure = "";
   const observed: Fetcher = async (input, options) => {
     failure = "request_validation_exception";
     // Validate locally so Request construction failures are not called network failures.
@@ -175,7 +177,14 @@ export async function oauthTokenRequest(
       } finally {
         reader?.releaseLock();
       }
-      console.warn("oauth_token_exchange_failure", status, category);
+      tokenFailure = category;
+      console.warn(
+        operation === "refresh"
+          ? "oauth_token_refresh_failure"
+          : "oauth_token_exchange_failure",
+        status,
+        category,
+      );
       reported = true;
     }
     return response;
@@ -185,9 +194,15 @@ export async function oauthTokenRequest(
   } catch (error) {
     if (!reported)
       console.warn(
-        "oauth_token_exchange_failure",
+        operation === "refresh"
+          ? "oauth_token_refresh_failure"
+          : "oauth_token_exchange_failure",
         status,
         status ? "success_body_unreadable" : failure,
+      );
+    if (operation === "refresh")
+      throw new ProviderError(
+        tokenFailure === "invalid_grant" ? "reconnect" : "retry",
       );
     throw error;
   }

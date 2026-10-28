@@ -3,10 +3,16 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 from zipfile import ZipFile, ZIP_DEFLATED, ZipInfo
 import csv
+import json
 
 root = Path(__file__).resolve().parents[1]
 columns = ["name", "email", "university", "interests", "subject", "body", "scheduled_at", "timezone", "follow_up_days", "follow_up_subject", "follow_up_body"]
 example = ["Synthetic Professor", "controlled@example.com", "Example University", "Robotics and machine learning", "MS research inquiry - sample only", "Dear Professor,\nThis is synthetic sample content. Replace and review before approving.", "2099-01-01T12:00:00Z", "Asia/Karachi", "3", "Follow-up - sample only", "Dear Professor,\nFollowing up on my research inquiry. Thank you for your time."]
+columns += ["follow_up_sequence", "follow_up_delay_value", "follow_up_delay_unit", "follow_up_relative_to"]
+example += ["", "", "", ""]
+for step in range(1, 6):
+    columns += [f"follow_up_{step}_{field}" for field in ["subject", "body", "delay_value", "delay_unit", "relative_to"]]
+    example += [""] * 5
 notes = [
     ["Instructions"],
     ["All example data is synthetic. No real professor is included."],
@@ -24,12 +30,27 @@ notes = [
     ["Replies, declines, opt-outs and bounces stop tracked pending follow-ups. Reply access is required."],
     ["Retries skip matching recipient/content/UTC schedule; import errors save no professors or drafts."],
 ]
+notes += [
+    ["Controlled example JSON (clear legacy follow-up fields first): " + json.dumps([{"subject": "MS research inquiry - sample only", "body": f"Controlled test follow-up {index + 1}", "delay_value": delay, "delay_unit": "minutes", "relative_to": "previous"} for index, delay in enumerate([5, 10, 15, 30, 30])])],
+    ["Flexible scheduling: clear follow_up_days and use follow_up_delay_value, follow_up_delay_unit (minutes/hours/days), follow_up_relative_to (original/previous), with follow_up_subject/body."],
+    ["For 1-5 steps use numbered follow_up_1_subject/body/delay_value/delay_unit/relative_to through follow_up_5_*, OR a JSON array in follow_up_sequence. Do not mix timing formats."],
+    ["Every due time is anchored to actual confirmed sends in UTC. Previous means the previous successfully confirmed follow-up. Steps execute in order; delays are earliest eligible times, not exact delivery promises."],
+    ["Five-step accelerated tests require a server-verified account-controlled test recipient. Excel cannot verify or authorize a recipient. External outreach permits one follow-up after at least 3 days."],
+    ["Approval includes every displayed step and the maximum total message count. Replies, declines, opt-outs, cancellation and failed checks stop or postpone sends. Changes require a new campaign approval."],
+]
+
+def column_name(index):
+    result = ""
+    while index >= 0:
+        result = chr(65 + index % 26) + result
+        index = index // 26 - 1
+    return result
 def sheet(rows):
     xml = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
     for n, row in enumerate(rows, 1):
         xml += f'<row r="{n}">'
         for i, value in enumerate(row):
-            ref = chr(65 + i) + str(n)
+            ref = column_name(i) + str(n)
             xml += f'<c r="{ref}" t="inlineStr"><is><t xml:space="preserve">{escape(str(value))}</t></is></c>'
         xml += '</row>'
     return xml + '</sheetData></worksheet>'

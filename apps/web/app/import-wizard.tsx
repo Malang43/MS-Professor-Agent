@@ -1,6 +1,7 @@
 ﻿"use client";
 import { useState } from "react";
 import { spreadsheetDraft } from "../../../shared/spreadsheet";
+import type { FollowupStep } from "../../../shared/followup-sequence";
 import type { Api } from "./account-ui";
 type Draft = {
   id: string;
@@ -20,6 +21,10 @@ type Connection = {
   provider: string;
   status: string;
 };
+const followupCount = (draft: Draft) =>
+  draft.followup_proposal
+    ? JSON.parse(draft.followup_proposal).steps?.length || 1
+    : 0;
 export function ImportWizard({
   rows,
   api,
@@ -255,6 +260,23 @@ export function ImportWizard({
       {d.followup_proposal ? (
         (() => {
           const f = JSON.parse(d.followup_proposal);
+          if (f.steps)
+            return (f.steps as FollowupStep[]).map((step, index) => (
+              <details open key={index}>
+                <summary>
+                  Conditional follow-up {index + 1}: {step.subject} ?{" "}
+                  {step.delay_value} {step.delay_unit} after {step.relative_to}
+                </summary>
+                <pre className="email-preview">{step.body}</pre>
+                <p>
+                  Only if no reply, decline, opt-out or recipient block. A
+                  failed reply check postpones sending. Accelerated multistep
+                  sequences require server-verified controlled recipients. Due
+                  times use actual confirmed sends; cron and Gmail may introduce
+                  delays.
+                </p>
+              </details>
+            ));
           return (
             <details open>
               <summary>
@@ -431,13 +453,19 @@ export function ImportWizard({
           <div className="campaign-summary">
             <strong>
               {included.length} initial emails +{" "}
-              {included.filter((d) => d.followup_proposal).length} exact
-              conditional follow-ups
+              {included.reduce(
+                (count, draft) => count + followupCount(draft),
+                0,
+              )}{" "}
+              exact conditional follow-ups
             </strong>
             <p>
               Maximum authorized emails:{" "}
               {included.length +
-                included.filter((d) => d.followup_proposal).length}
+                included.reduce(
+                  (count, draft) => count + followupCount(draft),
+                  0,
+                )}
               . Excluded recipients: {excluded.length}. Each approval explicitly
               authorizes both categories displayed here.
             </p>

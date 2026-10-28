@@ -7,6 +7,11 @@ import {
   testRecipients,
 } from "./live-controls";
 import { oauthAvailable } from "./oauth";
+import {
+  validateSequence,
+  delayMilliseconds,
+  type FollowupStep,
+} from "../../../shared/followup-sequence";
 export async function approveGmail(env: Env, user: string, body: unknown) {
   const input = z
     .object({
@@ -131,7 +136,12 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
             attachments: [],
             key: m.id + "@ms-professor-agent.invalid",
           };
-    let followup = null;
+    let followup: {
+      days: number;
+      subject: string;
+      body: string;
+      steps?: FollowupStep[];
+    } | null = null;
     if (input.authorize_followups) {
       if (!m.effective_followup && m.followup_issue)
         throw new HttpError(
@@ -140,18 +150,51 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
             recipient +
             ". Supply its exact subject, body and 1-30 day delay, or choose initial emails only.",
         );
-      if (m.effective_followup)
-        followup = z
-          .object({
-            days: z.number().int().min(1).max(30),
-            subject: z
-              .string()
-              .min(1)
-              .max(500)
-              .refine((v) => !/[\r\n]/.test(v)),
-            body: z.string().min(1).max(20000),
-          })
-          .parse(JSON.parse(m.effective_followup));
+      if (m.effective_followup) {
+        const proposed = JSON.parse(m.effective_followup);
+        if (proposed.steps) {
+          let steps: FollowupStep[];
+          try {
+            steps = validateSequence(proposed.steps);
+          } catch (error) {
+            throw new HttpError(400, (error as Error).message);
+          }
+          if (
+            !permitted.includes(recipient.toLowerCase()) &&
+            (steps.length > 1 || delayMilliseconds(steps[0]) < 3 * 86400000)
+          )
+            throw new HttpError(
+              403,
+              "External outreach allows one follow-up after at least 3 days. Accelerated sequences require a server-verified controlled test recipient.",
+            );
+          followup = {
+            days: 1,
+            subject: steps[0].subject,
+            body: steps[0].body,
+            steps,
+          };
+        } else
+          followup = z
+            .object({
+              days: z.number().int().min(1).max(30),
+              subject: z
+                .string()
+                .min(1)
+                .max(500)
+                .refine((v) => !/[\r\n]/.test(v)),
+              body: z.string().min(1).max(20000),
+            })
+            .parse(proposed);
+        if (
+          !permitted.includes(recipient.toLowerCase()) &&
+          !followup.steps &&
+          followup.days < 3
+        )
+          throw new HttpError(
+            403,
+            "New external outreach follow-ups require at least 3 days.",
+          );
+      }
     }
     if (followup && !/gmail.readonly/.test(connection.scopes))
       throw new HttpError(
@@ -186,7 +229,11 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
         user,
         authorizedAt,
         ids.length,
-        plans.filter((p) => p.followup).length,
+        plans.reduce(
+          (count, p) =>
+            count + (p.followup?.steps?.length || (p.followup ? 1 : 0)),
+          0,
+        ),
         input.sending_account_id,
         payload,
         input.name,
@@ -201,11 +248,26 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
         "UPDATE automation SET generated=1,cancel_reason='initial_only' WHERE message_id IN (SELECT json_extract(value,'$.id') FROM json_each(?)) AND ?=0",
       ).bind(payload, +input.authorize_followups),
       env.DB.prepare(
-        "INSERT INTO automation(message_id,days,subject,body) SELECT m.id,json_extract(j.value,'$.followup.days'),json_extract(j.value,'$.followup.subject'),json_extract(j.value,'$.followup.body') FROM json_each(?) j JOIN messages m ON m.id=json_extract(j.value,'$.id') WHERE m.user_id=? AND m.status='pending' AND m.live_ready=1 AND json_extract(j.value,'$.followup') IS NOT NULL ON CONFLICT(message_id) DO UPDATE SET generated=0,cancel_reason=NULL,days=excluded.days,subject=excluded.subject,body=excluded.body",
+        "INSERT INTO automation(message_id,days,subject,body) SELECT m.id,json_extract(j.value,'$.followup.days'),json_extract(j.value,'$.followup.subject'),json_extract(j.value,'$.followup.body') FROM json_each(?) j JOIN messages m ON m.id=json_extract(j.value,'$.id') WHERE m.user_id=? AND m.status='pending' AND m.live_ready=1 AND json_extract(j.value,'$.followup') IS NOT NULL AND json_extract(j.value,'$.followup.steps') IS NULL ON CONFLICT(message_id) DO UPDATE SET generated=0,cancel_reason=NULL,days=excluded.days,subject=excluded.subject,body=excluded.body",
       ).bind(payload, user),
       env.DB.prepare(
-        "INSERT INTO message_authorizations(message_id,user_id,campaign_id,snapshot,authorized_at,followup_authorized) SELECT json_extract(value,'$.id'),?,?,json_object('initial',json(json_extract(value,'$.snapshot')),'sending_account_id',?,'scheduled_at',json_extract(value,'$.scheduled_at'),'timezone',json_extract(value,'$.timezone'),'followup',json(json_extract(value,'$.followup')),'condition','only_if_no_reply','maximum_followups',CASE WHEN json_extract(value,'$.followup') IS NULL THEN 0 ELSE 1 END),?,CASE WHEN json_extract(value,'$.followup') IS NULL THEN 0 ELSE 1 END FROM json_each(?)",
+        "INSERT INTO message_authorizations(message_id,user_id,campaign_id,snapshot,authorized_at,followup_authorized) SELECT json_extract(value,'$.id'),?,?,json_object('initial',json(json_extract(value,'$.snapshot')),'sending_account_id',?,'scheduled_at',json_extract(value,'$.scheduled_at'),'timezone',json_extract(value,'$.timezone'),'followup',json(json_extract(value,'$.followup')),'condition','only_if_no_reply','maximum_followups',CASE WHEN json_extract(value,'$.followup') IS NULL THEN 0 ELSE COALESCE(json_array_length(json_extract(value,'$.followup.steps')),1) END),?,CASE WHEN json_extract(value,'$.followup') IS NULL THEN 0 ELSE 1 END FROM json_each(?)",
       ).bind(user, campaignId, input.sending_account_id, authorizedAt, payload),
+      env.DB.prepare(
+        "INSERT INTO followup_steps(root_id,step,child_id,subject,body,delay_value,delay_unit,relative_to,authorized_at) SELECT json_extract(value,'$.root_id'),json_extract(value,'$.step'),json_extract(value,'$.child_id'),json_extract(value,'$.subject'),json_extract(value,'$.body'),json_extract(value,'$.delay_value'),json_extract(value,'$.delay_unit'),json_extract(value,'$.relative_to'),? FROM json_each(?)",
+      ).bind(
+        authorizedAt,
+        JSON.stringify(
+          plans.flatMap((plan) =>
+            (plan.followup?.steps || []).map((step, index) => ({
+              ...step,
+              root_id: plan.id,
+              step: index + 1,
+              child_id: crypto.randomUUID(),
+            })),
+          ),
+        ),
+      ),
       env.DB.prepare(
         "INSERT INTO audit(id,user_id,action,entity_id) SELECT lower(hex(randomblob(16))),?,? ,json_extract(value,'$.id') FROM json_each(?)",
       ).bind(
@@ -234,8 +296,17 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
     scheduled: ids.length,
     campaign_id: campaignId,
     name: input.name,
-    authorized_followups: plans.filter((p) => p.followup).length,
-    total_messages: ids.length + plans.filter((p) => p.followup).length,
+    authorized_followups: plans.reduce(
+      (count, p) => count + (p.followup?.steps?.length || (p.followup ? 1 : 0)),
+      0,
+    ),
+    total_messages:
+      ids.length +
+      plans.reduce(
+        (count, p) =>
+          count + (p.followup?.steps?.length || (p.followup ? 1 : 0)),
+        0,
+      ),
   });
 }
 export async function retryGmail(env: Env, user: string, id: string) {

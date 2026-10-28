@@ -184,7 +184,9 @@ describe("OAuth security and provider adapters", () => {
       ).refresh_token,
     ).toBe("rotated-refresh");
     h.db.prepare("UPDATE connections SET expires_at=0").run();
-    const revoked = vi.fn(async () => new Response("{}", { status: 400 }));
+    const revoked = vi.fn(async () =>
+      Response.json({ error: "invalid_grant" }, { status: 400 }),
+    );
     await expect(
       accessToken(
         h.env,

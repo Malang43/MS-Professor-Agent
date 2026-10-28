@@ -34,9 +34,15 @@ import {
   History,
 } from "lucide-react";
 import { ImportWizard } from "./import-wizard";
+import {
+  SequenceSteps,
+  SchedulerStatus,
+  type SequenceStatus,
+} from "./sequence-status";
 import Papa from "papaparse";
 import readXlsxFile from "read-excel-file";
 import { spreadsheetDraft } from "../../../shared/spreadsheet";
+import type { FollowupStep } from "../../../shared/followup-sequence";
 import { localDate, zonedISO } from "../lib/timezone";
 
 // Production always uses the same-origin Vercel /api rewrite, including downloads.
@@ -95,6 +101,12 @@ type Message = {
 };
 type Audit = { id: string; action: string; created_at: string };
 type State = {
+  followup_steps?: SequenceStatus[];
+  scheduler?: {
+    started_at: number;
+    completed_at: number;
+    failure: string | null;
+  } | null;
   profile: Profile;
   professors: Professor[];
   documents: Doc[];
@@ -148,6 +160,8 @@ type State = {
     thread_id: string | null;
     attempts: number;
     next_at: number;
+    sync_checked_at?: number;
+    sync_error?: string | null;
   }[];
   mailbox_checks: {
     connection_id: string;
@@ -176,6 +190,10 @@ const nav = [
   ["Settings", Settings],
   ["Audit history", History],
 ] as const;
+const proposalCount = (message: Message) =>
+  message.followup_proposal
+    ? JSON.parse(message.followup_proposal).steps?.length || 1
+    : 0;
 const initialProfile = {
   name: "",
   university: "",
@@ -322,6 +340,9 @@ export default function Home() {
     university: "",
     interests: "",
   });
+  const [followupUnit, setFollowupUnit] = useState<
+    "minutes" | "hours" | "days"
+  >("days");
   const [draft, setDraft] = useState({
     sending_account_id: "",
     followup_enabled: false,
@@ -693,12 +714,18 @@ export default function Home() {
           <strong>
             Campaign approval: {items.length} initial emails +{" "}
             {authorizeImportedFollowups
-              ? items.filter((m) => !!m.followup_proposal).length
+              ? items.reduce(
+                  (count, message) => count + proposalCount(message),
+                  0,
+                )
               : 0}{" "}
             conditional follow-ups ={" "}
             {items.length +
               (authorizeImportedFollowups
-                ? items.filter((m) => !!m.followup_proposal).length
+                ? items.reduce(
+                    (count, message) => count + proposalCount(message),
+                    0,
+                  )
                 : 0)}{" "}
             total authorized messages
           </strong>
@@ -754,6 +781,29 @@ export default function Home() {
             {m.followup_proposal &&
               (() => {
                 const f = JSON.parse(m.followup_proposal);
+                if (f.steps)
+                  return (f.steps as FollowupStep[]).map((step, index) => (
+                    <div key={index}>
+                      <strong>
+                        Follow-up {index + 1} to {m.professor_email}:{" "}
+                        {step.subject}
+                      </strong>
+                      <p>
+                        {step.delay_value} {step.delay_unit} after{" "}
+                        {step.relative_to === "original"
+                          ? "original confirmed email"
+                          : "previous confirmed follow-up"}
+                        . Only if no reply, decline or opt-out; failed checks
+                        postpone delivery.
+                      </p>
+                      <pre className="email-preview">{step.body}</pre>
+                      <small>
+                        {authorizeImportedFollowups
+                          ? "Will be authorized with this approval"
+                          : "Proposed; not authorized"}
+                      </small>
+                    </div>
+                  ));
                 return (
                   <div>
                     <strong>
@@ -1995,6 +2045,24 @@ export default function Home() {
                   {followups.length} reminders
                 </span>
               </div>
+              <SchedulerStatus scheduler={state.scheduler} />
+              <SequenceSteps
+                steps={state.followup_steps || []}
+                busy={busy}
+                recipient={(root) =>
+                  state.messages.find((message) => message.id === root)
+                    ?.professor_email || root
+                }
+                cancel={(root, step) =>
+                  act(async () => {
+                    await request(
+                      `/messages/${root}/sequence/${step}/cancel`,
+                      "POST",
+                      {},
+                    );
+                  }, "Sequence cancelled")
+                }
+              />
               {state.automation.map((a) => {
                 const parent = state.messages.find(
                   (m) => m.id === a.message_id,
@@ -2010,6 +2078,13 @@ export default function Home() {
                       a.days * 86400000
                     : null);
                 const reason = a.cancel_reason;
+                const parentTransport = state.transports.find(
+                  (transport) => transport.message_id === parent.id,
+                );
+                const accountStatus = state.connections.find(
+                  (connection) =>
+                    connection.id === parentTransport?.connection_id,
+                )?.status;
                 const label = a.followup_provider_id
                   ? "Follow-up sent"
                   : reason === "reply" ||
@@ -2025,9 +2100,19 @@ export default function Home() {
                           : a.generated &&
                               (!child || child.status === "cancelled")
                             ? "Follow-up cancelled"
-                            : a.initial_provider_id
-                              ? "Follow-up scheduled"
-                              : "Automatic follow-up approved";
+                            : accountStatus !== "connected"
+                              ? "Delayed: reconnect Gmail in Settings"
+                              : a.child_transport_state === "uncertain"
+                                ? "Delayed: reconciling Gmail acceptance; no resend"
+                                : ["submitting", "leased"].includes(
+                                      a.child_transport_state || "",
+                                    )
+                                  ? "Sending"
+                                  : due && due <= Date.now()
+                                    ? "Due; awaiting reply check and scheduler"
+                                    : a.initial_provider_id
+                                      ? "Follow-up scheduled"
+                                      : "Automatic follow-up approved";
                 return (
                   <div className="document-row" key={a.message_id}>
                     <div>
@@ -2045,6 +2130,29 @@ export default function Home() {
                         </p>
                       )}
                       <p>Automatic follow-up approved: {a.subject}</p>
+                      {parentTransport?.sync_error && (
+                        <p role="alert">{parentTransport.sync_error}</p>
+                      )}
+                      <p>
+                        Last reply check:{" "}
+                        {parentTransport?.sync_checked_at
+                          ? displayDate(
+                              new Date(
+                                parentTransport.sync_checked_at,
+                              ).toISOString(),
+                              "Asia/Karachi",
+                            ) + " (Asia/Karachi)"
+                          : "Pending"}
+                        .
+                      </p>
+                      <p>
+                        Next action:{" "}
+                        {a.followup_provider_id || reason
+                          ? "None"
+                          : accountStatus !== "connected"
+                            ? "Reconnect Gmail in Settings. Existing approval is retained."
+                            : "Check replies, authorization and recipient eligibility before sending."}
+                      </p>
                       <pre className="email-preview">{a.body}</pre>
                       <p>
                         {due
@@ -2066,23 +2174,25 @@ export default function Home() {
                       >
                         View campaign
                       </button>
-                      {!a.generated && (
-                        <button
-                          className="secondary"
-                          disabled={busy}
-                          onClick={() =>
-                            act(async () => {
-                              await request(
-                                `/messages/${parent.id}/automation/cancel`,
-                                "POST",
-                                {},
-                              );
-                            }, "Preapproved follow-up cancelled")
-                          }
-                        >
-                          Cancel automatic follow-up
-                        </button>
-                      )}
+                      {!a.followup_provider_id &&
+                        !reason &&
+                        child?.status !== "cancelled" && (
+                          <button
+                            className="secondary"
+                            disabled={busy}
+                            onClick={() =>
+                              act(async () => {
+                                await request(
+                                  `/messages/${parent.id}/automation/cancel`,
+                                  "POST",
+                                  {},
+                                );
+                              }, "Preapproved follow-up cancelled")
+                            }
+                          >
+                            Cancel automatic follow-up
+                          </button>
+                        )}
                     </div>
                   </div>
                 );
@@ -2118,13 +2228,15 @@ export default function Home() {
                   </button>
                 </div>
               ))}
-              {!followups.length && !state.automation.length && (
-                <div className="empty">
-                  <CalendarClock size={30} />
-                  <h3>A little space for the next conversation</h3>
-                  <p>Open a sent message to set a follow-up reminder.</p>
-                </div>
-              )}
+              {!followups.length &&
+                !state.automation.length &&
+                !state.followup_steps?.length && (
+                  <div className="empty">
+                    <CalendarClock size={30} />
+                    <h3>A little space for the next conversation</h3>
+                    <p>Open a sent message to set a follow-up reminder.</p>
+                  </div>
+                )}
             </section>
           )}
           {view === "Settings" && (
@@ -2660,7 +2772,12 @@ export default function Home() {
                             : draft.mode,
                         followup: draft.followup_enabled
                           ? {
-                              days: draft.followup_days,
+                              days:
+                                followupUnit === "days"
+                                  ? draft.followup_days
+                                  : 1,
+                              delay_value: draft.followup_days,
+                              delay_unit: followupUnit,
                               subject: draft.followup_subject,
                               body: draft.followup_body,
                               authorized: draft.followup_authorized,
@@ -2896,11 +3013,17 @@ export default function Home() {
                     {draft.followup_enabled && (
                       <>
                         <label>
-                          Delay (days)
+                          Delay value
                           <input
                             type="number"
                             min={1}
-                            max={30}
+                            max={
+                              followupUnit === "minutes"
+                                ? 43200
+                                : followupUnit === "hours"
+                                  ? 720
+                                  : 30
+                            }
                             value={draft.followup_days}
                             onChange={(e) =>
                               setDraft({
@@ -2914,6 +3037,25 @@ export default function Home() {
                         </label>
                         <label>
                           Exact follow-up subject
+                          <select
+                            aria-label="Follow-up delay unit"
+                            value={followupUnit}
+                            onChange={(event) => {
+                              setFollowupUnit(
+                                event.target.value as
+                                  "minutes" | "hours" | "days",
+                              );
+                              setDraft({
+                                ...draft,
+                                followup_authorized: false,
+                                authorized: false,
+                              });
+                            }}
+                          >
+                            <option value="minutes">Minutes</option>
+                            <option value="hours">Hours</option>
+                            <option value="days">Days</option>
+                          </select>
                           <input
                             required
                             maxLength={500}
@@ -3091,6 +3233,38 @@ export default function Home() {
                   !state.automation.some((a) => a.message_id === review.id) &&
                   (() => {
                     const proposal = JSON.parse(review.followup_proposal);
+                    if (proposal.steps)
+                      return (
+                        <div>
+                          <h3>
+                            {state.followup_steps?.some(
+                              (step) => step.root_id === review.id,
+                            )
+                              ? "Authorized sequence"
+                              : "Proposed sequence; requires complete campaign approval"}
+                          </h3>
+                          {(proposal.steps as FollowupStep[]).map(
+                            (step, index) => (
+                              <div key={index}>
+                                <strong>
+                                  Follow-up {index + 1}: {step.subject}
+                                </strong>
+                                <p>
+                                  {step.delay_value} {step.delay_unit} after{" "}
+                                  {step.relative_to}
+                                </p>
+                                <pre className="email-preview">{step.body}</pre>
+                              </div>
+                            ),
+                          )}
+                          <p>
+                            Only if no reply, decline or opt-out. View
+                            Follow-ups for due times, mailbox checks and
+                            delivery status. Changing a sequence requires a new
+                            draft and complete approval.
+                          </p>
+                        </div>
+                      );
                     return (
                       <div>
                         <h3>

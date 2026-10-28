@@ -450,8 +450,12 @@ describe("reply-driven follow-up safety", () => {
     const a = await sent();
     await queueFollowups(h.env);
     expect(h.db.prepare("SELECT count(*) n FROM messages").get()!.n).toBe(1);
-    await syncReplies(h.env, (async () =>
-      Response.json({ messages: [] })) as any);
+    await syncReplies(
+      h.env,
+      (async () => Response.json({ messages: [] })) as any,
+      a.id,
+      a.message,
+    );
     await Promise.all([queueFollowups(h.env), queueFollowups(h.env)]);
     const children = h.db
       .prepare("SELECT * FROM messages WHERE parent_id=?")

@@ -2,6 +2,34 @@ import { afterEach, expect, it, vi } from "vitest";
 import { oauthTokenRequest } from "../src/providers";
 afterEach(() => vi.restoreAllMocks());
 it.each([
+  [400, "invalid_grant", "reconnect"],
+  [401, "invalid_client", "retry"],
+  [500, "server_error", "retry"],
+  [400, "invalid_request", "retry"],
+])(
+  "classifies refresh %s %s without leaking details",
+  async (status, category, kind) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(
+      oauthTokenRequest(
+        "https://oauth2.googleapis.com/token",
+        {},
+        async () =>
+          Response.json(
+            { error: category, error_description: "PRIVATE" },
+            { status: Number(status) },
+          ),
+        "refresh",
+      ),
+    ).rejects.toMatchObject({ kind });
+    expect(warn).toHaveBeenCalledWith(
+      "oauth_token_refresh_failure",
+      Number(status),
+      category,
+    );
+  },
+);
+it.each([
   [
     400,
     { error: "invalid_grant", error_description: "PRIVATE" },
