@@ -1,5 +1,5 @@
 ﻿"use client";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { spreadsheetDraft } from "../../../shared/spreadsheet";
 import type { FollowupStep } from "../../../shared/followup-sequence";
 import type { Api } from "./account-ui";
@@ -54,6 +54,11 @@ export function ImportWizard({
     [error, setError] = useState(""),
     [name, setName] = useState("Professor outreach campaign");
   const [receipt, setReceipt] = useState<any>(null);
+  const [importIds] = useState(() => ({
+    manual: crypto.randomUUID(),
+    ai: crypto.randomUUID(),
+  }));
+  const preparedAI = useRef<Record<string, string>[] | null>(null);
   async function run(fn: () => Promise<void>) {
     setBusy(true);
     setError("");
@@ -96,7 +101,13 @@ export function ImportWizard({
       throw Error(
         "No valid rows. Correct the listed spreadsheet errors and upload again.",
       );
-    if (ai) {
+    if (ai && preparedAI.current) {
+      valid.splice(
+        0,
+        valid.length,
+        ...preparedAI.current.map((row) => ({ ...row })),
+      );
+    } else if (ai) {
       await api(
         "/professors",
         "POST",
@@ -118,8 +129,12 @@ export function ImportWizard({
         if (generated.warning)
           errors.push(`${row.email}: ${generated.warning}`);
       }
+      preparedAI.current = valid.map((row) => ({ ...row }));
     }
-    const result = await api("/imports/drafts", "POST", valid);
+    const result = await api("/imports/drafts", "POST", {
+      import_id: importIds[ai ? "ai" : "manual"],
+      rows: valid,
+    });
     setReimported(result.reimported || []);
     setDrafts((result.drafts || []).filter((d: Draft) => d.status === "draft"));
     const unavailable = (result.drafts || []).filter(
@@ -246,7 +261,7 @@ export function ImportWizard({
           </label>
         </>
       ) : (
-        <details>
+        <details open>
           <summary>{d.subject} — expand initial email</summary>
           <pre className="email-preview">{d.body}</pre>
         </details>

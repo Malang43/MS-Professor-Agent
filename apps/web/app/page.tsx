@@ -1616,7 +1616,7 @@ export default function Home() {
                           onClick={() => {
                             if (
                               !window.confirm(
-                                `Permanently delete ${p.name}? Profile details will be removed and queued emails/follow-ups cancelled. Minimal address, delivery and authorization audit records are retained to prevent further sending. Already accepted or in-flight Gmail messages cannot be recalled.`,
+                                `Delete ${p.name}? Profile details will be removed and this record's queued emails/follow-ups cancelled. History is retained. You can import the address again for a new campaign; genuine opt-outs and account blocks remain enforced. Already accepted or in-flight Gmail messages cannot be recalled.`,
                               )
                             )
                               return;

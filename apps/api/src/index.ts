@@ -605,7 +605,7 @@ async function route(req: Request, env: Env): Promise<Response> {
       ).bind(user, ...chunks),
       audit(env, user, "professors.imported"),
     ]);
-    return json({ imported: results[3].meta.changes });
+    return json({ imported: results[results.length - 2].meta.changes });
   }
 
   if (path === "/api/draft" && method === "POST") {
@@ -667,11 +667,14 @@ async function route(req: Request, env: Env): Promise<Response> {
     return json({ ok: true });
   }
   if (path === "/api/imports/drafts" && method === "POST") {
-    const input = z
-      .array(z.record(z.string(), z.string()))
-      .min(1)
-      .max(25)
+    const rowSchema = z.array(z.record(z.string(), z.string())).min(1).max(25);
+    const request = z
+      .union([
+        rowSchema,
+        z.object({ import_id: z.string().uuid(), rows: rowSchema }),
+      ])
       .parse(await req.json());
+    const input = Array.isArray(request) ? request : request.rows;
     const recipientRows = new Map<string, string>();
     for (const row of input) {
       const key = row.email?.trim().toLowerCase() || "";
@@ -709,19 +712,57 @@ async function route(req: Request, env: Env): Promise<Response> {
           ...draft,
           id: id(),
           professor_id: professorId,
-          import_key: await digest(
-            JSON.stringify([
-              professorId,
-              draft.email,
-              draft.subject,
-              draft.body,
-              draft.scheduled_at,
-              draft.followup_proposal,
-            ]),
-          ),
+          import_key: "",
         };
       }),
     );
+    const normalized = [
+      ...new Map(
+        rows.map(({ id: messageId, professor_id, import_key, ...draft }) => [
+          draft.email,
+          draft,
+        ]),
+      ).values(),
+    ].sort((left, right) => left.email.localeCompare(right.email));
+    const payloadHash = await digest(JSON.stringify(normalized));
+    let importId: string;
+    if (Array.isArray(request)) {
+      const retired = await env.DB.prepare(
+        "SELECT count(*) n FROM campaign_imports campaign WHERE campaign.user_id=? AND campaign.payload_hash=? AND EXISTS(SELECT 1 FROM messages m JOIN professors p ON p.id=m.professor_id WHERE m.user_id=campaign.user_id AND m.campaign_import_id=campaign.id AND (m.status!='draft' OR m.approved=1 OR m.archived_at IS NOT NULL OR m.hidden_at IS NOT NULL OR p.deleted_at IS NOT NULL))",
+      )
+        .bind(user, payloadHash)
+        .first<{ n: number }>();
+      importId =
+        "legacy:" +
+        (await digest(JSON.stringify([payloadHash, retired?.n || 0])));
+    } else importId = request.import_id;
+    const previous = await env.DB.prepare(
+      "SELECT payload_hash FROM campaign_imports WHERE user_id=? AND id=?",
+    )
+      .bind(user, importId)
+      .first<{ payload_hash: string }>();
+    if (previous) {
+      if (previous.payload_hash !== payloadHash)
+        throw new HttpError(
+          409,
+          "Import changed; start a new campaign instead of reusing its submission ID.",
+        );
+      const drafts = (
+        await env.DB.prepare(
+          "SELECT m.id,m.professor_id,m.status,m.subject,m.body,m.scheduled_at,m.timezone,m.followup_proposal,m.followup_issue,m.followup_draft,m.campaign_import_id,COALESCE(m.approved_recipient,p.deleted_email,p.email) professor_email,p.name professor_name FROM messages m JOIN professors p ON p.id=m.professor_id WHERE m.user_id=? AND m.campaign_import_id=?",
+        )
+          .bind(user, importId)
+          .all()
+      ).results;
+      return json({
+        import_id: importId,
+        created: 0,
+        skipped: rows.length,
+        drafts,
+        reimported: [],
+      });
+    }
+    for (const row of rows) row.import_key = importId + ":" + row.email;
     // Reserve the bounded import budget before a single atomic transaction. Retries
     // may consume budget but can never create a second copy of the same email.
     await consume(env, `messages:${user}`, 50, rows.length);
@@ -735,6 +776,9 @@ async function route(req: Request, env: Env): Promise<Response> {
     ).results.map((r) => r.email);
     const payload = JSON.stringify(rows);
     const results = await env.DB.batch([
+      env.DB.prepare(
+        "INSERT OR IGNORE INTO campaign_imports(user_id,id,payload_hash,created_at) VALUES(?,?,?,?)",
+      ).bind(user, importId, payloadHash, Date.now()),
       ...reimportDeleted(
         env,
         user,
@@ -746,23 +790,31 @@ async function route(req: Request, env: Env): Promise<Response> {
         ON CONFLICT(user_id,email) DO NOTHING`,
       ).bind(user, payload),
       env.DB.prepare(
-        `INSERT INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone,followup_proposal,import_key,approved_recipient,followup_issue,followup_draft)
-        SELECT json_extract(j.value,'$.id'),?,p.id,json_extract(j.value,'$.subject'),json_extract(j.value,'$.body'),'manual',0,0,'draft',json_extract(j.value,'$.scheduled_at'),json_extract(j.value,'$.timezone'),json_extract(j.value,'$.followup_proposal'),json_extract(j.value,'$.import_key'),json_extract(j.value,'$.email'),json_extract(j.value,'$.followup_issue'),json_extract(j.value,'$.followup_draft')
+        `INSERT INTO messages(id,user_id,professor_id,subject,body,mode,authorized,approved,status,scheduled_at,timezone,followup_proposal,import_key,approved_recipient,followup_issue,followup_draft,campaign_import_id)
+        SELECT json_extract(j.value,'$.id'),?,p.id,json_extract(j.value,'$.subject'),json_extract(j.value,'$.body'),'manual',0,0,'draft',json_extract(j.value,'$.scheduled_at'),json_extract(j.value,'$.timezone'),json_extract(j.value,'$.followup_proposal'),json_extract(j.value,'$.import_key'),json_extract(j.value,'$.email'),json_extract(j.value,'$.followup_issue'),json_extract(j.value,'$.followup_draft'),?
         FROM json_each(?) j JOIN professors p ON p.user_id=? AND p.email=json_extract(j.value,'$.email')
-        WHERE p.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.user_id=p.user_id AND m.professor_id=p.id AND m.subject=json_extract(j.value,'$.subject') AND m.body=json_extract(j.value,'$.body') AND m.scheduled_at=json_extract(j.value,'$.scheduled_at'))
-        ON CONFLICT(user_id,import_key) WHERE import_key IS NOT NULL DO NOTHING`,
-      ).bind(user, payload, user),
+        WHERE p.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.user_id=p.user_id AND m.campaign_import_id=? AND m.approved_recipient=json_extract(j.value,'$.email'))
+        ON CONFLICT DO NOTHING`,
+      ).bind(user, importId, payload, user, importId),
       audit(env, user, "spreadsheet.drafts_imported"),
-    ]);
-    const created = results[4].meta.changes;
+    ]).catch((error) => {
+      if (error instanceof Error && error.message.includes("Import changed"))
+        throw new HttpError(
+          409,
+          "Import changed; start a new campaign instead of reusing its submission ID.",
+        );
+      throw error;
+    });
+    const created = results[results.length - 2].meta.changes;
     const drafts = (
       await env.DB.prepare(
-        "SELECT m.id,m.professor_id,m.status,m.subject,m.body,m.scheduled_at,m.timezone,m.followup_proposal,m.followup_issue,m.followup_draft,p.email professor_email,p.name professor_name FROM messages m JOIN professors p ON p.id=m.professor_id WHERE m.user_id=? AND p.deleted_at IS NULL AND EXISTS(SELECT 1 FROM json_each(?) j WHERE p.email=json_extract(j.value,'$.email') AND m.subject=json_extract(j.value,'$.subject') AND m.body=json_extract(j.value,'$.body') AND m.scheduled_at=json_extract(j.value,'$.scheduled_at'))",
+        "SELECT m.id,m.professor_id,m.status,m.subject,m.body,m.scheduled_at,m.timezone,m.followup_proposal,m.followup_issue,m.followup_draft,m.campaign_import_id,p.email professor_email,p.name professor_name FROM messages m JOIN professors p ON p.id=m.professor_id WHERE m.user_id=? AND m.campaign_import_id=?",
       )
-        .bind(user, payload)
+        .bind(user, importId)
         .all()
     ).results;
     return json({
+      import_id: importId,
       created,
       skipped: rows.length - created,
       drafts,

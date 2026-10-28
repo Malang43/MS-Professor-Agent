@@ -12,6 +12,8 @@ The current owner has authorized restricted live activation for `raza1206896@gma
 
 ## Current simplified campaign workflow
 
+The current repeat-campaign correction is documented in [REPEAT-CAMPAIGN-RELEASE.md](docs/REPEAT-CAMPAIGN-RELEASE.md): new uploads create independent campaigns even for previously contacted recipients, retries are scoped to the upload, deletion alone never permanently blocks an address, and genuine opt-outs remain enforced. One complete approval still authorizes every displayed initial email and conditional follow-up.
+
 See [SIMPLIFIED-CAMPAIGN-RELEASE.md](docs/SIMPLIFIED-CAMPAIGN-RELEASE.md) for the current Excel wizard, safe deleted-address reimport, one-time atomic approval and deployment verification. Transactional authentication email is disabled; no Mailjet setup is required. Password login, registered passkeys and saved recovery codes remain available. Unverified users retain private workspace access while sensitive mailbox actions remain verification-gated under the existing policy.
 
 ## Historical transactional account email

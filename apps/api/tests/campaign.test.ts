@@ -34,6 +34,259 @@ const sequenceStep = (
 });
 
 describe("precise conditional sequences", () => {
+  it.each([
+    "completed",
+    "cancelled",
+    "archived",
+    "deleted",
+    "removed",
+    "replied",
+  ])(
+    "creates a fresh fully approved campaign after a %s campaign without changing its history",
+    async (previousState) => {
+      const upload = async (importId = crypto.randomUUID()) => {
+        const response = await h.request(
+          "/imports/drafts",
+          "POST",
+          { import_id: importId, rows: [row] },
+          owner.session,
+        );
+        expect(response.status).toBe(200);
+        return response.json();
+      };
+      const first = await upload();
+      const old = first.drafts[0];
+      expect((await approve([old.id], true)).status).toBe(200);
+      if (["completed", "removed", "replied"].includes(previousState))
+        await runLiveJobs(h.env, provider().network as any);
+      if (previousState === "cancelled")
+        await h.request(
+          `/messages/${old.id}/cancel`,
+          "POST",
+          {},
+          owner.session,
+        );
+      if (previousState === "archived")
+        await h.request(
+          `/professors/${old.professor_id}/archive`,
+          "POST",
+          {},
+          owner.session,
+        );
+      if (previousState === "deleted")
+        await h.request(
+          `/professors/${old.professor_id}/delete`,
+          "POST",
+          { confirmed: true },
+          owner.session,
+        );
+      if (previousState === "removed")
+        await h.request(
+          `/messages/${old.id}/remove`,
+          "POST",
+          { confirmed: true },
+          owner.session,
+        );
+      if (previousState === "replied") {
+        advance(2000);
+        await syncReplies(
+          h.env,
+          provider(true).network as any,
+          owner.id,
+          old.id,
+        );
+        expect(
+          h.db.prepare("SELECT status FROM messages WHERE id=?").get(old.id)!
+            .status,
+        ).toBe("replied");
+      }
+      const history = () =>
+        JSON.stringify({
+          message: h.db
+            .prepare("SELECT * FROM messages WHERE id=?")
+            .get(old.id),
+          transport: h.db
+            .prepare("SELECT * FROM transports WHERE message_id=?")
+            .get(old.id),
+          authorization: h.db
+            .prepare("SELECT * FROM message_authorizations WHERE message_id=?")
+            .get(old.id),
+          automation: h.db
+            .prepare("SELECT * FROM automation WHERE message_id=?")
+            .get(old.id),
+        });
+      const before = history();
+      const next = await upload();
+      expect(next.created).toBe(1);
+      expect(next.import_id).not.toBe(first.import_id);
+      expect(next.drafts).toHaveLength(1);
+      expect(next.drafts[0].id).not.toBe(old.id);
+      expect(next.drafts[0]).toMatchObject({
+        status: "draft",
+        scheduled_at: new Date(row.scheduled_at).toISOString(),
+      });
+      const approval = await approve([next.drafts[0].id], true);
+      expect(approval.status).toBe(200);
+      expect(await approval.json()).toMatchObject({
+        scheduled: 1,
+        authorized_followups: 1,
+        total_messages: 2,
+      });
+      const authorizations = h.db
+        .prepare(
+          "SELECT campaign_id FROM message_authorizations WHERE message_id IN (?,?)",
+        )
+        .all(old.id, next.drafts[0].id);
+      expect(
+        new Set(
+          authorizations.map((authorization) => authorization.campaign_id),
+        ).size,
+      ).toBe(2);
+      expect(history()).toBe(before);
+    },
+  );
+
+  it("deduplicates concurrent and retried submissions only within their import and rejects conflicting reused IDs", async () => {
+    const importId = crypto.randomUUID();
+    const upload = (rows = [row]) =>
+      h.request(
+        "/imports/drafts",
+        "POST",
+        { import_id: importId, rows },
+        owner.session,
+      );
+    const responses = await Promise.all([upload(), upload()]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    const results = await Promise.all(
+      responses.map((response) => response.json()),
+    );
+    expect(results.reduce((count, result) => count + result.created, 0)).toBe(
+      1,
+    );
+    expect(results[0].drafts[0].id).toBe(results[1].drafts[0].id);
+    expect(
+      (await upload([{ ...row, body: "Changed submission" }])).status,
+    ).toBe(409);
+    const old = results[0].drafts[0];
+    await h.request(`/messages/${old.id}/cancel`, "POST", {}, owner.session);
+    expect(await (await upload()).json()).toMatchObject({
+      created: 0,
+      drafts: [{ id: old.id, status: "cancelled" }],
+    });
+    const fresh = await h.request(
+      "/imports/drafts",
+      "POST",
+      { import_id: crypto.randomUUID(), rows: [row] },
+      owner.session,
+    );
+    expect(await fresh.json()).toMatchObject({ created: 1 });
+    expect(h.db.prepare("SELECT count(*) n FROM messages").get()!.n).toBe(2);
+  });
+
+  it.each(["decline", "opt_out", "manual opt-out", "account block"])(
+    "keeps genuine %s protection when a deleted recipient starts a new campaign",
+    async (reason) => {
+      const [old] = await importRows();
+      await h.request(
+        `/professors/${old.professor_id}/delete`,
+        "POST",
+        { confirmed: true },
+        owner.session,
+      );
+      h.db
+        .prepare(
+          "INSERT INTO suppressions(user_id,address,reason) VALUES(?,?,?)",
+        )
+        .run(owner.id, recipient, reason);
+      const response = await h.request(
+        "/imports/drafts",
+        "POST",
+        { import_id: crypto.randomUUID(), rows: [row] },
+        owner.session,
+      );
+      expect(response.status).toBe(200);
+      const result = await response.json();
+      expect((await approve([result.drafts[0].id], true)).status).toBe(409);
+      expect(
+        h.db.prepare("SELECT reason FROM suppressions").get()!.reason,
+      ).toBe(reason);
+      expect(h.db.prepare("SELECT count(*) n FROM transports").get()!.n).toBe(
+        0,
+      );
+    },
+  );
+
+  it("approves every step of a new five-step campaign once after cancelling the old identical campaign", async () => {
+    const rows = [
+      sequenceRow(Array.from({ length: 5 }, () => sequenceStep(5))),
+    ];
+    const upload = async () => {
+      const response = await h.request(
+        "/imports/drafts",
+        "POST",
+        { import_id: crypto.randomUUID(), rows },
+        owner.session,
+      );
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    const first = await upload();
+    const old = first.drafts[0];
+    await approve([old.id], true);
+    await h.request(`/messages/${old.id}/cancel`, "POST", {}, owner.session);
+    const next = await upload();
+    const fresh = next.drafts[0];
+    const approval = await approve([fresh.id], true);
+    expect(approval.status).toBe(200);
+    expect(await approval.json()).toMatchObject({
+      authorized_followups: 5,
+      total_messages: 6,
+    });
+    const p = provider();
+    await runLiveJobs(h.env, p.network as any);
+    for (let step = 0; step < 5; step++) {
+      advance(301000);
+      await queueSequence(h.env, p.network as any);
+      await runLiveJobs(h.env, p.network as any);
+    }
+    expect(p.submissions()).toBe(6);
+    expect(
+      h.db.prepare("SELECT status FROM messages WHERE id=?").get(old.id)!
+        .status,
+    ).toBe("cancelled");
+    expect(
+      h.db
+        .prepare(
+          "SELECT count(*) n FROM followup_steps WHERE root_id=? AND cancel_reason='cancelled'",
+        )
+        .get(old.id)!.n,
+    ).toBe(5);
+    expect(
+      h.db
+        .prepare(
+          "SELECT count(*) n FROM message_authorizations WHERE campaign_id=(SELECT campaign_id FROM message_authorizations WHERE message_id=?)",
+        )
+        .get(fresh.id)!.n,
+    ).toBe(6);
+    expect((await approve([fresh.id], true)).status).toBe(409);
+  });
+
+  it("rejects duplicate recipients selected together from separate new imports", async () => {
+    const ids = [];
+    for (let index = 0; index < 2; index++) {
+      const response = await h.request(
+        "/imports/drafts",
+        "POST",
+        { import_id: crypto.randomUUID(), rows: [row] },
+        owner.session,
+      );
+      ids.push((await response.json()).drafts[0].id);
+    }
+    expect((await approve(ids, true)).status).toBe(400);
+    expect(
+      h.db.prepare("SELECT count(*) n FROM campaign_approvals").get()!.n,
+    ).toBe(0);
+  });
   it("checks replies in earlier distinct follow-up threads before submitting the next step", async () => {
     const [draft] = await importRows([
       sequenceRow([

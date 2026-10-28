@@ -5,6 +5,9 @@ export function reimportDeleted(env: Env, user: string, emails: string[]) {
   const payload = JSON.stringify([...new Set(emails)]);
   return [
     env.DB.prepare(
+      "INSERT OR IGNORE INTO suppressions(user_id,address,reason) SELECT DISTINCT m.user_id,lower(COALESCE(json_extract(t.snapshot,'$.recipient'),m.approved_recipient,p.deleted_email,p.email)),'historical_recipient_block' FROM messages m JOIN professors p ON p.id=m.professor_id LEFT JOIN transports t ON t.message_id=m.id WHERE m.user_id=? AND lower(COALESCE(json_extract(t.snapshot,'$.recipient'),m.approved_recipient,p.deleted_email,p.email)) IN (SELECT value FROM json_each(?)) AND (EXISTS(SELECT 1 FROM audit a WHERE a.user_id=m.user_id AND a.entity_id=m.id AND a.action IN ('recipient.decline','recipient.opt_out','recipient.bounce')) OR EXISTS(SELECT 1 FROM mailbox_events e WHERE e.message_id=m.id AND e.kind IN ('decline','opt_out','bounce')))",
+    ).bind(user, payload),
+    env.DB.prepare(
       "INSERT INTO audit(id,user_id,action,entity_id) SELECT lower(hex(randomblob(16))),user_id,'professor.reimported_as_new',id FROM professors WHERE user_id=? AND deleted_at IS NOT NULL AND email IN (SELECT value FROM json_each(?))",
     ).bind(user, payload),
     env.DB.prepare(

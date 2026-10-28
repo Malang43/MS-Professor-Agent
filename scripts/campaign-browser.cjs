@@ -261,15 +261,73 @@ const { chromium } = require(
       "cancelled",
     );
     await page.getByRole("button", { name: "Close", exact: true }).click();
-    const csv =
-      "name,email,university,interests,subject,body,scheduled_at,timezone\nSecond Professor,second@example.com,Example U,Robotics,Exact individual subject,Exact individual body,2099-01-01T12:00:00Z,Asia/Karachi";
+    const cancelled = h.db
+      .prepare("SELECT * FROM messages ORDER BY rowid LIMIT 1")
+      .get();
+    const oldAuthorization = JSON.stringify(
+      h.db
+        .prepare("SELECT * FROM message_authorizations WHERE message_id=?")
+        .get(cancelled.id),
+    );
     await page
       .locator('input[accept=".csv,.xlsx"]')
-      .setInputFiles({
-        name: "individual.csv",
-        mimeType: "text/csv",
-        buffer: Buffer.from(csv),
-      });
+      .setInputFiles("apps/web/public/professors-email-template.xlsx");
+    await page
+      .getByRole("button", { name: /Manual \/ Use Excel content/ })
+      .click();
+    await page
+      .getByRole("button", { name: "Review entire campaign once", exact: true })
+      .click();
+    await page
+      .getByRole("button", {
+        name: "APPROVE & SCHEDULE COMPLETE CAMPAIGN",
+        exact: true,
+      })
+      .click();
+    await page
+      .getByRole("heading", {
+        name: "Campaign approved & scheduled",
+        exact: true,
+      })
+      .waitFor();
+    const repeated = h.db
+      .prepare("SELECT * FROM messages ORDER BY rowid DESC LIMIT 1")
+      .get();
+    assert.notEqual(repeated.id, cancelled.id);
+    assert.notEqual(repeated.campaign_import_id, cancelled.campaign_import_id);
+    assert.equal(repeated.status, "pending");
+    assert.deepEqual(
+      h.db.prepare("SELECT * FROM messages WHERE id=?").get(cancelled.id),
+      cancelled,
+    );
+    assert.equal(
+      JSON.stringify(
+        h.db
+          .prepare("SELECT * FROM message_authorizations WHERE message_id=?")
+          .get(cancelled.id),
+      ),
+      oldAuthorization,
+    );
+    assert.equal(
+      h.db.prepare("SELECT count(*) n FROM campaign_approvals").get().n,
+      2,
+    );
+    assert.equal(
+      h.db
+        .prepare(
+          "SELECT count(*) n FROM message_authorizations WHERE followup_authorized=1",
+        )
+        .get().n,
+      2,
+    );
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+    const csv =
+      "name,email,university,interests,subject,body,scheduled_at,timezone\nSecond Professor,second@example.com,Example U,Robotics,Exact individual subject,Exact individual body,2099-01-01T12:00:00Z,Asia/Karachi";
+    await page.locator('input[accept=".csv,.xlsx"]').setInputFiles({
+      name: "individual.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from(csv),
+    });
     await page
       .getByRole("button", { name: /Manual \/ Use Excel content/ })
       .click();
@@ -299,15 +357,13 @@ const { chromium } = require(
       1,
     );
     await page.getByRole("button", { name: "Close", exact: true }).click();
-    await page
-      .locator('input[accept=".csv,.xlsx"]')
-      .setInputFiles({
-        name: "ai.csv",
-        mimeType: "text/csv",
-        buffer: Buffer.from(
-          csv.replace("Exact individual subject", "AI preparation input"),
-        ),
-      });
+    await page.locator('input[accept=".csv,.xlsx"]').setInputFiles({
+      name: "ai.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from(
+        csv.replace("Exact individual subject", "AI preparation input"),
+      ),
+    });
     await page.getByRole("button", { name: /AI-assisted preparation/ }).click();
     await page
       .getByRole("button", { name: "Review emails individually", exact: true })
@@ -331,7 +387,7 @@ const { chromium } = require(
     );
     assert.equal(errors.length, 0, "Browser runtime errors");
     console.log(
-      "PASS browser: actual XLSX upload, Manual, entire campaign, one approval, persisted success, cancellation, individual edits/approval, AI safe fallback, mobile layout, no Outreach revisit and no real delivery.",
+      "PASS browser: actual XLSX upload, Manual, complete review and one approval, cancellation then fresh identical workbook campaign with retained history, individual review, AI safe fallback, mobile layout and no real delivery.",
     );
   } finally {
     await browser.close();

@@ -26,7 +26,7 @@ export async function recordAction(
   if (table === "professors" && row.deleted_at)
     throw new HttpError(
       409,
-      "This professor was permanently removed; its sending suppression is retained.",
+      "This professor record was removed. Import the address again to create a new record and campaign.",
     );
   if (action === "delete" || action === "remove")
     z.object({ confirmed: z.literal(true) }).parse(await req.json());
@@ -41,9 +41,6 @@ export async function recordAction(
       env.DB.prepare(
         "UPDATE professors SET deleted_at=?,archived_at=?,name='Deleted professor',university='',interests='',source_url=NULL,verified_at=NULL WHERE id=? AND user_id=? AND deleted_at IS NULL",
       ).bind(now, now, id, user),
-      env.DB.prepare(
-        "INSERT OR IGNORE INTO suppressions(user_id,address,reason) SELECT ?,lower(COALESCE(json_extract(t.snapshot,'$.recipient'),m.approved_recipient,p.email)),'professor_deleted' FROM messages m JOIN professors p ON p.id=m.professor_id LEFT JOIN transports t ON t.message_id=m.id WHERE m.professor_id=? AND m.user_id=?",
-      ).bind(user, id, user),
       audit,
     ]);
   } else if (action === "remove") {
@@ -68,6 +65,12 @@ export async function recordAction(
       ).bind(now, id, user),
       env.DB.prepare(
         "UPDATE automation SET generated=1,cancel_reason=COALESCE(cancel_reason,'dashboard_removed') WHERE message_id=?",
+      ).bind(id),
+      env.DB.prepare(
+        "UPDATE followup_steps SET cancel_reason=COALESCE(cancel_reason,'dashboard_removed') WHERE root_id=?",
+      ).bind(id),
+      env.DB.prepare(
+        "UPDATE messages SET status='cancelled' WHERE status IN ('draft','pending') AND id IN (SELECT child_id FROM followup_steps WHERE root_id=?)",
       ).bind(id),
       env.DB.prepare(
         "UPDATE messages SET status='cancelled' WHERE parent_id=? AND user_id=? AND status IN ('draft','pending')",

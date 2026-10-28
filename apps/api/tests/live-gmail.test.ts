@@ -125,7 +125,7 @@ describe("real Gmail production workflow", () => {
     expect(check.detail).not.toContain("never persisted");
   });
 
-  it("blocks duplicate real approvals across separate drafts with the same recipient, content and schedule", async () => {
+  it("permits a genuinely new campaign with identical content while rejecting repeated approval of its messages", async () => {
     const [draft] = await importRows();
     expect((await approve([draft.id])).status).toBe(200);
     const duplicate = crypto.randomUUID();
@@ -134,8 +134,9 @@ describe("real Gmail production workflow", () => {
         "INSERT INTO messages(id,user_id,professor_id,subject,body,mode,scheduled_at,timezone,approved_recipient) SELECT ?,user_id,professor_id,subject,body,'manual',scheduled_at,timezone,approved_recipient FROM messages WHERE id=?",
       )
       .run(duplicate, draft.id);
+    expect((await approve([duplicate])).status).toBe(200);
     expect((await approve([duplicate])).status).toBe(409);
-    expect(h.db.prepare("SELECT count(*) n FROM transports").get()!.n).toBe(1);
+    expect(h.db.prepare("SELECT count(*) n FROM transports").get()!.n).toBe(2);
   });
   it("does not revive historically authorized follow-ups when live delivery is enabled", async () => {
     const [draft] = await importRows();

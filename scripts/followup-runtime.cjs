@@ -14,6 +14,7 @@ async function main() {
     import {runLiveJobs} from './apps/api/src/automation';
     export default {async fetch(req,env) {
       const route=new URL(req.url).pathname;
+      if(route.startsWith('/api/'))return worker.fetch(req,env);
       if(route==='/tokens')return Response.json({tokens:await encrypt(env,'runtime-user:gmail:tokens:v1',{access_token:'synthetic',refresh_token:'synthetic',expires_in:3600})});
       if(route==='/queue')await queueSequence(env);
       if(route==='/send')await runLiveJobs(env);
@@ -169,8 +170,70 @@ async function main() {
       .prepare("SELECT * FROM scheduler_health WHERE id=1")
       .first();
     assert(health.completed_at && !health.failure);
+    const session = "runtime-import-session";
+    await db
+      .prepare(
+        "INSERT INTO sessions(token,user_id,expires_at) VALUES(?,'runtime-user',?)",
+      )
+      .bind(
+        require("node:crypto")
+          .createHash("sha256")
+          .update(session)
+          .digest("hex"),
+        Date.now() + 3600000,
+      )
+      .run();
+    await db
+      .prepare("UPDATE users SET email_verified_at=? WHERE id='runtime-user'")
+      .bind(Date.now())
+      .run();
+    const rows = [
+      {
+        name: "Repeat recipient",
+        email: "repeat@example.invalid",
+        subject: "Same reviewed content",
+        body: "Synthetic only",
+        scheduled_at: "2099-01-01T00:00:00Z",
+        timezone: "Asia/Karachi",
+      },
+    ];
+    const firstImport = require("node:crypto").randomUUID();
+    const request = async (route, body) => {
+      const response = await mf.dispatchFetch(
+        "https://synthetic.invalid/api" + route,
+        {
+          method: "POST",
+          headers: {
+            Origin: "https://synthetic.invalid",
+            Cookie: "session=" + session,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        },
+      );
+      assert.equal(response.status, 200, await response.clone().text());
+      return response.json();
+    };
+    const first = await request("/imports/drafts", {
+      import_id: firstImport,
+      rows,
+    });
+    await request("/messages/" + first.drafts[0].id + "/cancel", {});
+    const retry = await request("/imports/drafts", {
+      import_id: firstImport,
+      rows,
+    });
+    assert.equal(retry.created, 0);
+    assert.equal(retry.drafts[0].status, "cancelled");
+    const repeated = await request("/imports/drafts", {
+      import_id: require("node:crypto").randomUUID(),
+      rows,
+    });
+    assert.equal(repeated.created, 1);
+    assert.notEqual(repeated.drafts[0].id, first.drafts[0].id);
+    assert.equal(submissions, 1);
     console.log(
-      "PASS native Workers runtime and D1: all migrations, exact step approval, 5-minute due time, Gmail threading, duplicate queue/send prevention and scheduled handler health. All provider traffic intercepted; no real mail.",
+      "PASS native Workers runtime and D1: all migrations, new import after cancellation, idempotent import retries, exact step approval, 5-minute due time, Gmail threading, duplicate queue/send prevention and scheduled handler health. All provider traffic intercepted; no real mail.",
     );
   } finally {
     await mf.dispose();

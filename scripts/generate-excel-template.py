@@ -25,10 +25,10 @@ notes = [
     ["Provide follow_up_days, follow_up_subject and follow_up_body together. Legacy followup_* columns remain supported; conflicting aliases are rejected."],
     ["Missing follow-up content is marked in review and cannot be authorized. Spreadsheet authorization columns are ignored."],
     ["Select all campaign drafts, review exact initial and follow-up content, select Gmail, then choose Approve initial emails and automatic follow-ups."],
-    ["One campaign approval can authorize up to 25 initial emails plus one exact conditional follow-up per initial. No later approval is required."],
+    ["One campaign approval authorizes all displayed initial emails and exact conditional steps. Verified controlled tests support up to five follow-ups per recipient; external outreach allows one conservative follow-up. No later approval is required."],
     ["Existing owner-controlled sending restrictions still apply. This template never activates sending or changes approved recipients."],
     ["Replies, declines, opt-outs and bounces stop tracked pending follow-ups. Reply access is required."],
-    ["Retries skip matching recipient/content/UTC schedule; import errors save no professors or drafts."],
+    ["Every new upload creates a new campaign, even for previously contacted recipients or identical content and schedules. Retries within that upload reuse its drafts. Genuine opt-outs and account blocks remain enforced."],
 ]
 notes += [
     ["Controlled example JSON (clear legacy follow-up fields first): " + json.dumps([{"subject": "MS research inquiry - sample only", "body": f"Controlled test follow-up {index + 1}", "delay_value": delay, "delay_unit": "minutes", "relative_to": "previous"} for index, delay in enumerate([5, 10, 15, 30, 30])])],

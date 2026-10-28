@@ -85,6 +85,7 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
     .bind(user)
     .all<{ address: string }>();
   const plans = [];
+  const selectedRecipients = new Set<string>();
   for (const m of rows.results) {
     if (m.deleted_at)
       throw new HttpError(409, "A deleted professor cannot receive email.");
@@ -106,6 +107,12 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
     const recipient = m.snapshot
       ? JSON.parse(m.snapshot).recipient
       : m.recipient;
+    if (selectedRecipients.has(recipient.toLowerCase()))
+      throw new HttpError(
+        400,
+        "A campaign may contain only one initial message per recipient. Review the duplicate selection.",
+      );
+    selectedRecipients.add(recipient.toLowerCase());
     if (suppressed.results.some((r) => r.address === recipient.toLowerCase()))
       throw new HttpError(409, "A selected recipient is deleted or opted out.");
     if (!production && !permitted.includes(recipient.toLowerCase()))
@@ -209,6 +216,7 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
       timezone: m.timezone,
       fingerprint: await hash(
         JSON.stringify([
+          m.campaign_import_id || m.id,
           snapshot.recipient.toLowerCase(),
           snapshot.subject,
           snapshot.body,

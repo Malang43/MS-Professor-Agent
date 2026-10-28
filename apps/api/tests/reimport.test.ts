@@ -22,6 +22,21 @@ async function upload() {
   expect(r.status).toBe(200);
   return (await r.json()) as any;
 }
+it("permits legacy workbook imports again after cancellation without reusing the cancelled message", async () => {
+  const first = await upload();
+  const old = first.drafts[0];
+  expect(
+    (await h.request(`/messages/${old.id}/cancel`, "POST", {}, u.session))
+      .status,
+  ).toBe(200);
+  const repeated = await upload();
+  expect(repeated.created).toBe(1);
+  expect(repeated.drafts[0].id).not.toBe(old.id);
+  expect(
+    h.db.prepare("SELECT status FROM messages WHERE id=?").get(old.id)!.status,
+  ).toBe("cancelled");
+  expect((await upload()).created).toBe(0);
+});
 async function remove(id: string) {
   expect(
     (
@@ -116,9 +131,7 @@ it("rolls back tombstone release and suppression removal if fresh import fails",
   expect(
     h.db.prepare("SELECT email,deleted_email FROM professors").get(),
   ).toMatchObject({ email: row.email, deleted_email: null });
-  expect(h.db.prepare("SELECT reason FROM suppressions").get()!.reason).toBe(
-    "professor_deleted",
-  );
+  expect(h.db.prepare("SELECT count(*) n FROM suppressions").get()!.n).toBe(0);
 });
 it("preserves exact spreadsheet whitespace and permits editing only private unapproved drafts", async () => {
   const result = await upload(),
