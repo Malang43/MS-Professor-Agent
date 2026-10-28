@@ -47,7 +47,16 @@ The workbook includes a controlled example using previous-step minute delays `[5
 - Existing browser regression passes actual XLSX upload, Manual and AI fallback preparation, complete/individual campaign approval, persisted success, cancellation and mobile layout with synthetic accounts.
 - Migration `0009_followup_sequences.sql` is additive. Production verification compares current variables/binding metadata and protected-record hashes. Mailjet, Turnstile, passkeys, recovery codes, Groq, account data, documents and existing approvals are not reconfigured.
 
-## Remaining live verification
+## Deployment evidence
+
+- GitHub application commit: `f475d78` on the existing private repository's `main` branch.
+- Cloudflare Worker version: `44f20fbf-4c70-4bc9-83d6-270dd656c13c`.
+- Vercel production deployment: `dpl_EYghB8aT7dpoee43BR4SG7iVUwg3` (READY), canonical alias `https://ms-professor-agent-malang43.vercel.app`.
+- Remote D1 migration 0009 applied successfully. Production variables and all existing binding metadata compare exactly to the pre-release baseline; protected-record hashes, old queue state and immutable authorizations match.
+- Automatic cron executions completed at October 29, 00:42:42, 00:43:43 and 00:44:43 Pakistan time, covering all three scheduler phases with no recorded failure. No manual scheduler request was used to produce those heartbeats. Continued reliability and live Gmail delivery require ongoing observation, not just registration.
+- Canonical production health returns HTTP 200, Gmail provider, KV storage, live sending enabled and `gmail_ready=false`, consistent with the required reconnection. Authentication/origin rejection and byte-for-byte XLSX/CSV downloads pass against the live alias.
+
+## Owner action
 
 The account owner must reconnect Gmail; local code cannot restore deleted/revoked provider credentials. Then approve an exact five-step controlled test inside the app and test replies at selected stages. No real test emails were sent during development. Verify actual inbox arrival and Gmail threading against dashboard provider IDs, and confirm live scheduler heartbeats advance without manual runs. No paid service or plan change is required by this release. Cloudflare's existing Free-plan CPU/provider quotas still apply; passing local runtime tests does not promise an outage-free service.
 

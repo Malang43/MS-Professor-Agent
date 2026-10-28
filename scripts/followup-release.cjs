@@ -82,6 +82,33 @@ async function main() {
       "PASS captured deployed variables, binding metadata and protected-data hashes; no mailbox traffic.",
     );
   } else {
+    const content = await fetch(
+      "https://api.cloudflare.com/client/v4" + worker,
+      { headers: { Authorization: "Bearer " + token } },
+    );
+    assert.equal(content.status, 200);
+    const raw = await content.text();
+    const boundary = raw.slice(0, raw.indexOf("\r\n"));
+    let deployed;
+    for (const part of raw.split(boundary)) {
+      const split = part.indexOf("\r\n\r\n");
+      if (split >= 0 && /name="index\.js"/.test(part.slice(0, split)))
+        deployed = part.slice(split + 4).replace(/\r\n$/, "");
+    }
+    const bundlePath = [
+      directory + "/followup-build/index.js",
+      directory + "/.wrangler/followup-build/index.js",
+    ].find((file) => fs.existsSync(file));
+    assert(bundlePath, "Local release bundle missing");
+    assert.equal(
+      deployed,
+      fs.readFileSync(bundlePath, "utf8"),
+      "Deployed Worker differs from tested release bundle",
+    );
+    console.log(
+      "PASS exact deployed Worker bundle SHA256 " +
+        crypto.createHash("sha256").update(deployed).digest("hex"),
+    );
     const before = JSON.parse(
       fs.readFileSync(directory + "/followup-baseline.json", "utf8"),
     );
