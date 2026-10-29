@@ -14,7 +14,10 @@ import {
   checkGmail,
   testRecipients,
 } from "./live-controls";
-import { spreadsheetDraft } from "../../../shared/spreadsheet";
+import {
+  spreadsheetDraft,
+  normalizeSpreadsheetRow,
+} from "../../../shared/spreadsheet";
 import { validateSequence } from "../../../shared/followup-sequence";
 import {
   accountPublic,
@@ -667,14 +670,21 @@ async function route(req: Request, env: Env): Promise<Response> {
     return json({ ok: true });
   }
   if (path === "/api/imports/drafts" && method === "POST") {
-    const rowSchema = z.array(z.record(z.string(), z.string())).min(1).max(25);
+    const rowSchema = z.array(z.record(z.string(), z.unknown())).min(1).max(25);
     const request = z
       .union([
         rowSchema,
         z.object({ import_id: z.string().uuid(), rows: rowSchema }),
       ])
       .parse(await req.json());
-    const input = Array.isArray(request) ? request : request.rows;
+    let input: Record<string, string>[];
+    try {
+      input = (Array.isArray(request) ? request : request.rows).map(
+        normalizeSpreadsheetRow,
+      );
+    } catch (error) {
+      throw new HttpError(400, (error as Error).message);
+    }
     const recipientRows = new Map<string, string>();
     for (const row of input) {
       const key = row.email?.trim().toLowerCase() || "";

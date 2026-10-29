@@ -19,24 +19,42 @@ export type SpreadsheetDraft = {
   followup_draft?: { days?: number; subject: string; body: string };
 };
 
+// Normalize only scalar spreadsheet cells; never coerce objects into email content.
+export function normalizeSpreadsheetRow(
+  row: Record<string, unknown>,
+  index: number,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(row).map(([key, value]) => {
+      if (value == null) return [key, ""];
+      if (typeof value === "string") return [key, value];
+      if (typeof value === "number" && Number.isFinite(value))
+        return [key, String(value)];
+      throw new Error(
+        `Row ${index + 2}: ${key} must be text or a finite number.`,
+      );
+    }),
+  );
+}
+
 export function spreadsheetDraft(
-  row: Record<string, string>,
+  row: Record<string, unknown>,
   index: number,
   allowIncompleteFollowup = false,
 ): SpreadsheetDraft {
   const fail = (message: string): never => {
     throw new Error(`Row ${index + 2}: ${message}`);
   };
-  row = { ...row };
+  const cells = normalizeSpreadsheetRow(row, index);
   for (const field of ["days", "subject", "body"]) {
-    const oldValue = row["followup_" + field],
-      newValue = row["follow_up_" + field];
+    const oldValue = cells["followup_" + field],
+      newValue = cells["follow_up_" + field];
     if (oldValue && newValue && oldValue !== newValue)
       fail("conflicting followup_ and follow_up_ columns: " + field);
-    row["followup_" + field] = newValue || oldValue || "";
+    cells["followup_" + field] = newValue || oldValue || "";
   }
-  const subject = row.subject || "",
-    body = row.body || "";
+  const subject = cells.subject || "",
+    body = cells.body || "";
   if (
     !subject.trim() ||
     subject.length > 500 ||
@@ -47,7 +65,7 @@ export function spreadsheetDraft(
     fail(
       "provide subject (up to 500 characters) and body (up to 20000 characters).",
     );
-  const date = row.scheduled_at || "";
+  const date = cells.scheduled_at || "";
   // Excel date cells have no timezone: require UTC text to avoid browser-dependent shifts.
   if (
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(date) ||
@@ -58,7 +76,7 @@ export function spreadsheetDraft(
     );
   if (new Date(date).toISOString().slice(0, 19) !== date.slice(0, 19))
     fail("invalid calendar date.");
-  const timezone = row.timezone?.trim() || "Asia/Karachi";
+  const timezone = cells.timezone?.trim() || "Asia/Karachi";
   try {
     new Intl.DateTimeFormat("en", { timeZone: timezone });
   } catch {
@@ -68,16 +86,16 @@ export function spreadsheetDraft(
   let followup_issue: string | undefined,
     followup_draft: SpreadsheetDraft["followup_draft"];
   if (
-    (row.followup_days || row.followup_subject || row.followup_body) &&
-    !row.follow_up_delay_value &&
-    !row.follow_up_sequence &&
-    !row.follow_up_1_delay_value
+    (cells.followup_days || cells.followup_subject || cells.followup_body) &&
+    !cells.follow_up_delay_value &&
+    !cells.follow_up_sequence &&
+    !cells.follow_up_1_delay_value
   ) {
-    const days = Number(row.followup_days),
-      subject = row.followup_subject || "",
-      body = row.followup_body || "";
+    const days = Number(cells.followup_days),
+      subject = cells.followup_subject || "",
+      body = cells.followup_body || "";
     if (
-      (row.followup_days &&
+      (cells.followup_days &&
         (!Number.isInteger(days) || days < 1 || days > 30)) ||
       subject.length > 500 ||
       /[\r\n]/.test(subject) ||
@@ -86,11 +104,11 @@ export function spreadsheetDraft(
       fail(
         "follow-up requires an integer delay of 1-30 days, a single-line subject and a body up to 20000 characters.",
       );
-    if (!row.followup_days || !subject || !body) {
+    if (!cells.followup_days || !subject || !body) {
       followup_issue =
         "Missing follow-up " +
         [
-          !row.followup_days ? "delay" : "",
+          !cells.followup_days ? "delay" : "",
           !subject ? "subject" : "",
           !body ? "body" : "",
         ]
@@ -99,7 +117,7 @@ export function spreadsheetDraft(
         "; automatic follow-up cannot be authorized.";
       if (!allowIncompleteFollowup) fail(followup_issue);
       followup_draft = {
-        ...(row.followup_days ? { days } : {}),
+        ...(cells.followup_days ? { days } : {}),
         subject,
         body,
       };
@@ -109,24 +127,24 @@ export function spreadsheetDraft(
     const prefix = `follow_up_${index + 1}_`;
     if (
       !["subject", "body", "delay_value", "delay_unit", "relative_to"].some(
-        (field) => row[prefix + field],
+        (field) => cells[prefix + field],
       )
     )
       return null;
     return {
-      subject: row[prefix + "subject"],
-      body: row[prefix + "body"],
-      delay_value: Number(row[prefix + "delay_value"]),
-      delay_unit: row[prefix + "delay_unit"],
-      relative_to: row[prefix + "relative_to"],
+      subject: cells[prefix + "subject"],
+      body: cells[prefix + "body"],
+      delay_value: Number(cells[prefix + "delay_value"]),
+      delay_unit: cells[prefix + "delay_unit"],
+      relative_to: cells[prefix + "relative_to"],
     };
   });
   let configured: unknown = null;
-  if (row.follow_up_sequence) {
+  if (cells.follow_up_sequence) {
     if (numbered.some(Boolean))
       fail("use either follow_up_sequence JSON or numbered step columns.");
     try {
-      configured = JSON.parse(row.follow_up_sequence);
+      configured = JSON.parse(cells.follow_up_sequence);
     } catch {
       fail("invalid follow_up_sequence JSON.");
     }
@@ -137,26 +155,26 @@ export function spreadsheetDraft(
     );
     configured = numbered.slice(0, last + 1);
   } else if (
-    row.follow_up_delay_value ||
-    row.follow_up_delay_unit ||
-    row.follow_up_relative_to
+    cells.follow_up_delay_value ||
+    cells.follow_up_delay_unit ||
+    cells.follow_up_relative_to
   ) {
     configured = [
       {
-        subject: row.followup_subject,
-        body: row.followup_body,
-        delay_value: Number(row.follow_up_delay_value),
-        delay_unit: row.follow_up_delay_unit,
-        relative_to: row.follow_up_relative_to || "original",
+        subject: cells.followup_subject,
+        body: cells.followup_body,
+        delay_value: Number(cells.follow_up_delay_value),
+        delay_unit: cells.follow_up_delay_unit,
+        relative_to: cells.follow_up_relative_to || "original",
       },
     ];
   }
-  if (configured || row.follow_up_sequence) {
-    if (row.followup_days)
+  if (configured || cells.follow_up_sequence) {
+    if (cells.followup_days)
       fail("legacy day delay conflicts with sequence timing.");
     if (
-      (row.follow_up_sequence || numbered.some(Boolean)) &&
-      (row.followup_subject || row.followup_body)
+      (cells.follow_up_sequence || numbered.some(Boolean)) &&
+      (cells.followup_subject || cells.followup_body)
     )
       fail("legacy follow-up content conflicts with sequence content.");
     let steps: FollowupStep[];
@@ -176,10 +194,10 @@ export function spreadsheetDraft(
   }
   // Spreadsheet authorization flags are never accepted.
   return {
-    name: row.name?.trim() || "",
-    email: row.email?.trim().toLowerCase() || "",
-    university: row.university?.trim() || "",
-    interests: row.interests?.trim() || "",
+    name: cells.name?.trim() || "",
+    email: cells.email?.trim().toLowerCase() || "",
+    university: cells.university?.trim() || "",
+    interests: cells.interests?.trim() || "",
     subject,
     body,
     scheduled_at: new Date(date).toISOString(),

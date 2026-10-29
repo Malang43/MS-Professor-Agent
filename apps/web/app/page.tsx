@@ -205,21 +205,51 @@ const initialProfile = {
   stopped: 0,
 };
 async function request(path: string, method = "GET", data?: unknown) {
-  const res = await fetch(API + "/api" + path, {
-    method,
-    credentials: "include",
-    headers:
-      data instanceof FormData
-        ? {}
-        : data
-          ? { "Content-Type": "application/json" }
-          : {},
-    body:
-      data instanceof FormData ? data : data ? JSON.stringify(data) : undefined,
-  });
-  const result = await res.json();
-  if (!res.ok) throw new Error(result.error || "Request failed");
-  return result;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(API + "/api" + path, {
+      method,
+      credentials: "include",
+      signal: controller.signal,
+      headers:
+        data instanceof FormData
+          ? {}
+          : data
+            ? { "Content-Type": "application/json" }
+            : {},
+      body:
+        data instanceof FormData
+          ? data
+          : data
+            ? JSON.stringify(data)
+            : undefined,
+    });
+    const text = await res.text();
+    let result;
+    try {
+      result = JSON.parse(text);
+    } catch {
+      throw new Error(
+        `Request ${method} /api${path} returned HTTP ${res.status} without a JSON response. Please retry.`,
+      );
+    }
+    if (!res.ok)
+      throw new Error(result.error || `Request failed (HTTP ${res.status}).`);
+    return result;
+  } catch (error) {
+    if (controller.signal.aborted)
+      throw new Error(
+        "The request timed out after 60 seconds. Its save status is uncertain. Retry in this wizard to safely recover the same submission.",
+      );
+    if (error instanceof TypeError)
+      throw new Error(
+        `Could not reach ${method} /api${path}. Check your connection and retry. If this was a campaign save, retry in this wizard to recover the same submission without duplicates.`,
+      );
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 function displayDate(value: string, tz: string) {
   return new Date(value).toLocaleString(undefined, {
@@ -496,7 +526,19 @@ export default function Home() {
     let rows: Record<string, string>[];
     if (file.name.toLowerCase().endsWith(".xlsx")) {
       const sheet = await readXlsxFile(file);
-      const headers = sheet[0]?.map((h) => String(h).trim().toLowerCase());
+      const headers = sheet[0]?.map((h) =>
+        String(h ?? "")
+          .trim()
+          .toLowerCase(),
+      );
+      if (
+        !headers?.length ||
+        headers.some((h) => !h) ||
+        new Set(headers).size !== headers.length
+      )
+        throw new Error(
+          "Excel headers must be nonempty and unique. Use the downloadable template column names.",
+        );
       rows = sheet
         .slice(1)
         .filter((r) => r.some(Boolean))

@@ -131,10 +131,34 @@ export function ImportWizard({
       }
       preparedAI.current = valid.map((row) => ({ ...row }));
     }
+    // Keep an uncertain submission recoverable after closing or refreshing the wizard.
+    // Scope to the browser session and exact payload; clear only after acknowledgement.
+    const bytes = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(JSON.stringify(valid)),
+    );
+    const pendingKey =
+      "campaign-pending:" +
+      (ai ? "ai:" : "manual:") +
+      Array.from(new Uint8Array(bytes), (b) =>
+        b.toString(16).padStart(2, "0"),
+      ).join("");
+    let importId = importIds[ai ? "ai" : "manual"];
+    try {
+      importId = sessionStorage.getItem(pendingKey) || importId;
+      sessionStorage.setItem(pendingKey, importId);
+    } catch {
+      /* Storage may be disabled; same-wizard retries still reuse the ID. */
+    }
     const result = await api("/imports/drafts", "POST", {
-      import_id: importIds[ai ? "ai" : "manual"],
+      import_id: importId,
       rows: valid,
     });
+    try {
+      sessionStorage.removeItem(pendingKey);
+    } catch {
+      /* Optional storage. */
+    }
     setReimported(result.reimported || []);
     setDrafts((result.drafts || []).filter((d: Draft) => d.status === "draft"));
     const unavailable = (result.drafts || []).filter(
