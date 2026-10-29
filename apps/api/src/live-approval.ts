@@ -24,6 +24,7 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
         .default("Professor outreach campaign"),
       sending_account_id: z.string().uuid(),
       authorize_followups: z.boolean().default(false),
+      dry_run: z.boolean().default(false),
     })
     .parse(body);
   const ids = [...new Set(input.ids)];
@@ -223,6 +224,31 @@ export async function approveGmail(env: Env, user: string, body: unknown) {
           m.scheduled_at,
         ]),
       ),
+    });
+  }
+  // Validate the identical plan without creating authorizations, transports or schedules.
+  // A later real approval reruns every check; this response never grants permission to send.
+  if (input.dry_run) {
+    const followups = plans.reduce(
+      (count, plan) =>
+        count + (plan.followup?.steps?.length || (plan.followup ? 1 : 0)),
+      0,
+    );
+    return Response.json({
+      ok: true,
+      dry_run: true,
+      scheduled: 0,
+      authorized_followups: 0,
+      would_schedule: plans.length,
+      would_authorize_followups: followups,
+      total_messages: plans.length + followups,
+      recipients: plans.map((plan) => ({
+        address: plan.snapshot.recipient,
+        controlled_test: permitted.includes(
+          plan.snapshot.recipient.toLowerCase(),
+        ),
+        followup_steps: plan.followup?.steps || [],
+      })),
     });
   }
   const payload = JSON.stringify(plans),

@@ -24,9 +24,14 @@ const { Miniflare, convertV4MiniflareOptions } = require(
       kvNamespaces: ["DOCUMENTS_KV"],
       bindings: {
         APP_ORIGIN: "https://synthetic.invalid",
-        LIVE_EMAIL_ENABLED: "false",
+        LIVE_EMAIL_ENABLED: "true",
         MOCK_DELIVERY_ENABLED: "false",
-        OAUTH_ENABLED: "false",
+        OAUTH_ENABLED: "true",
+        LIVE_OWNER_USER_IDS: "import-qa",
+        LIVE_TEST_RECIPIENTS: "irshad1206896@gmail.com",
+        GMAIL_CLIENT_ID: "synthetic",
+        GMAIL_CLIENT_SECRET: "synthetic",
+        TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString("base64"),
       },
       outboundService: () => {
         throw Error("All outbound traffic forbidden");
@@ -63,13 +68,14 @@ const { Miniflare, convertV4MiniflareOptions } = require(
     const steps = Array.from({ length: 4 }, (_, i) => ({
       subject: "Conditional " + i,
       body: "Synthetic follow-up " + i,
-      delay_value: 3,
-      delay_unit: "days",
+      delay_value: 5,
+      delay_unit: "minutes",
       relative_to: "previous",
     }));
     const rows = [1, 2].map((i) => ({
       name: "Synthetic " + i,
-      email: `import-${i}@example.invalid`,
+      email:
+        i === 1 ? "irshad1206896@gmail.com" : `import-${i}@example.invalid`,
       subject: "Unsent initial",
       body: "Synthetic draft",
       scheduled_at: "2099-01-01T00:00:00Z",
@@ -97,6 +103,60 @@ const { Miniflare, convertV4MiniflareOptions } = require(
     assert.equal(r.body.created, 2);
     for (const d of r.body.drafts)
       assert.equal(JSON.parse(d.followup_proposal).steps.length, 4);
+    const connection = crypto.randomUUID();
+    await db.batch([
+      db
+        .prepare(
+          "INSERT INTO connections(id,user_id,provider,address,subject,scopes,tokens,expires_at) VALUES(?,'import-qa','gmail','sender@example.invalid','synthetic','gmail.send gmail.readonly','unused',?)",
+        )
+        .bind(connection, Date.now() + 3600000),
+      db
+        .prepare(
+          "INSERT INTO mailbox_checks(connection_id,checked_at,status,detail) VALUES(?,?,'ready','Synthetic')",
+        )
+        .bind(connection, Date.now()),
+    ]);
+    const controlled = r.body.drafts.find(
+      (d) => d.professor_email === "irshad1206896@gmail.com",
+    );
+    const approval = await mf.dispatchFetch(
+      "https://synthetic.invalid/api/messages/approve",
+      {
+        method: "POST",
+        headers: {
+          Origin: "https://synthetic.invalid",
+          Cookie: "session=" + session,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ids: [controlled.id],
+          sending_account_id: connection,
+          authorize_followups: true,
+          dry_run: true,
+        }),
+      },
+    );
+    assert.equal(approval.status, 200, await approval.clone().text());
+    const preview = await approval.json();
+    assert.equal(preview.dry_run, true);
+    assert.equal(preview.would_schedule, 1);
+    assert.equal(preview.would_authorize_followups, 4);
+    assert.equal(preview.total_messages, 5);
+    assert.equal(preview.recipients[0].controlled_test, true);
+    assert(
+      preview.recipients[0].followup_steps.every(
+        (s) => s.delay_value === 5 && s.delay_unit === "minutes",
+      ),
+    );
+    assert.equal(
+      (
+        await db
+          .prepare("SELECT status FROM messages WHERE id=?")
+          .bind(controlled.id)
+          .first()
+      ).status,
+      "draft",
+    );
     const repeated = await Promise.all([
       post({ import_id, rows }),
       post({ import_id, rows }),
@@ -154,7 +214,7 @@ const { Miniflare, convertV4MiniflareOptions } = require(
         0,
       );
     console.log(
-      "PASS native Workers/D1: two recipients, four conditional follow-ups each, concurrent retries, changed-payload rejection, forced failure rollback, zero approvals and deliveries. All outbound network forbidden.",
+      "PASS native Workers/D1: two recipients, four conditional follow-ups each, concurrent retries, changed-payload rejection, forced failure rollback, controlled Gmail dry-run approval of one initial plus four five-minute steps, zero approvals and deliveries. All outbound network forbidden.",
     );
   } finally {
     await mf.dispose();

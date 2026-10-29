@@ -986,11 +986,17 @@ async function route(req: Request, env: Env): Promise<Response> {
     return json({ id: messageId });
   }
   if (path === "/api/messages/approve" && method === "POST") {
-    if (env.MOCK_DELIVERY_ENABLED === "false")
-      return approveGmail(env, user, await req.json());
+    const approval = await req.json();
+    const dryRun =
+      typeof approval === "object" &&
+      approval !== null &&
+      "dry_run" in approval &&
+      approval.dry_run === true;
+    if (env.MOCK_DELIVERY_ENABLED === "false" || dryRun)
+      return approveGmail(env, user, approval);
     const { ids } = z
       .object({ ids: z.array(z.string().uuid()).min(1).max(500) })
-      .parse(await req.json());
+      .parse(approval);
     const uniqueIds = Array.from(new Set(ids)),
       serializedIds = JSON.stringify(uniqueIds);
     const rows = (
